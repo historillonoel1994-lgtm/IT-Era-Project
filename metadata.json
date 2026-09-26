@@ -1,0 +1,6 @@
+{
+  "name": "Study Buddy AI",
+  "description": "Smart Support for Working Students. AI-powered lesson summarization, quizzes, tutoring, and work-study planning aligned with SDG 4 Quality Education.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

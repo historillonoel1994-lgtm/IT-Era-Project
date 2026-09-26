@@ -1,0 +1,314 @@
+import React, { useState } from 'react';
+import { X, Upload, FileText, Check, AlertCircle, BookOpen, Sparkles, Loader2 } from 'lucide-react';
+import { LessonDocument } from '../types';
+import { DEFAULT_LESSONS } from '../data/defaultLessons';
+import { parsePdfFile } from '../services/api';
+import { addLesson } from '../services/storage';
+
+interface UploadLessonModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onLessonUploaded: (lesson: LessonDocument) => void;
+}
+
+export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
+  isOpen,
+  onClose,
+  onLessonUploaded,
+}) => {
+  const [activeTab, setActiveTab] = useState<'upload' | 'samples'>('upload');
+  const [file, setFile] = useState<File | null>(null);
+  const [title, setTitle] = useState('');
+  const [subject, setSubject] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [extractedPreview, setExtractedPreview] = useState<{ totalPages: number; pages: { pageNumber: number; text: string }[] } | null>(null);
+
+  if (!isOpen) return null;
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    setError(null);
+    const selectedFile = e.target.files?.[0];
+    if (!selectedFile) return;
+
+    setFile(selectedFile);
+    if (!title) {
+      setTitle(selectedFile.name.replace(/\.[^/.]+$/, ''));
+    }
+    if (!subject) {
+      setSubject('General College Course');
+    }
+
+    // If PDF, parse it immediately to show preview
+    if (selectedFile.type === 'application/pdf' || selectedFile.name.endsWith('.pdf')) {
+      setLoading(true);
+      try {
+        const reader = new FileReader();
+        reader.onload = async () => {
+          try {
+            const base64 = reader.result as string;
+            const parsed = await parsePdfFile(base64, selectedFile.name);
+            setExtractedPreview(parsed);
+          } catch (err: any) {
+            setError(err.message || 'Could not parse PDF. You can still paste or select a sample.');
+          } finally {
+            setLoading(false);
+          }
+        };
+        reader.readAsDataURL(selectedFile);
+      } catch (err: any) {
+        setError(err.message);
+        setLoading(false);
+      }
+    } else if (selectedFile.name.endsWith('.txt') || selectedFile.name.endsWith('.md')) {
+      // Text file extraction
+      setLoading(true);
+      const reader = new FileReader();
+      reader.onload = () => {
+        const text = reader.result as string;
+        // Split roughly into 500-word pseudo-pages
+        const paragraphs = text.split('\n\n');
+        const pages: { pageNumber: number; text: string }[] = [];
+        let cur = '';
+        let pageNum = 1;
+        for (const p of paragraphs) {
+          cur += p + '\n\n';
+          if (cur.length > 1200) {
+            pages.push({ pageNumber: pageNum++, text: cur.trim() });
+            cur = '';
+          }
+        }
+        if (cur.trim().length > 0) {
+          pages.push({ pageNumber: pageNum, text: cur.trim() });
+        }
+        setExtractedPreview({
+          totalPages: pages.length || 1,
+          pages: pages.length > 0 ? pages : [{ pageNumber: 1, text }],
+        });
+        setLoading(false);
+      };
+      reader.readAsText(selectedFile);
+    } else {
+      setError('Please upload a PDF (.pdf) or text (.txt) document.');
+    }
+  };
+
+  const handleSubmit = () => {
+    if (!extractedPreview || extractedPreview.pages.length === 0) {
+      setError('Please select a valid PDF file with readable text content.');
+      return;
+    }
+
+    const newLesson: LessonDocument = {
+      id: `lesson-${Date.now()}`,
+      title: title.trim() || file?.name || 'Untitled Lesson Material',
+      subject: subject.trim() || 'General Course',
+      totalPages: extractedPreview.totalPages,
+      uploadedAt: new Date().toISOString(),
+      pages: extractedPreview.pages,
+      isSample: false,
+    };
+
+    addLesson(newLesson);
+    onLessonUploaded(newLesson);
+    onClose();
+  };
+
+  const handleSelectSample = (sample: LessonDocument) => {
+    addLesson(sample);
+    onLessonUploaded(sample);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn">
+      <div className="bg-white rounded-2xl shadow-2xl border border-sky-100 max-w-xl w-full overflow-hidden flex flex-col max-h-[92vh]">
+        {/* Header */}
+        <div className="px-6 py-4 bg-gradient-to-r from-sky-800 to-slate-900 text-white flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="p-2 bg-sky-500/20 rounded-lg text-sky-300 border border-sky-400/30">
+              <Upload className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-bold text-base text-white">Upload Learning Material</h3>
+              <p className="text-xs text-sky-200/80">
+                Add your PDF textbook, syllabus, or lecture notes
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Tab switch */}
+        <div className="px-6 pt-3 pb-1 border-b border-slate-100 flex space-x-4 bg-slate-50/50 text-xs font-semibold">
+          <button
+            onClick={() => setActiveTab('upload')}
+            className={`pb-2.5 border-b-2 transition-colors ${
+              activeTab === 'upload'
+                ? 'border-sky-600 text-sky-700'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            Upload University PDF
+          </button>
+          <button
+            onClick={() => setActiveTab('samples')}
+            className={`pb-2.5 border-b-2 transition-colors flex items-center space-x-1.5 ${
+              activeTab === 'samples'
+                ? 'border-sky-600 text-sky-700'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+            <span>Select Course Preset (Fast Demo)</span>
+          </button>
+        </div>
+
+        {/* Content body */}
+        <div className="p-6 overflow-y-auto flex-1">
+          {error && (
+            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl flex items-start space-x-2 text-xs text-red-800">
+              <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {activeTab === 'upload' ? (
+            <div className="space-y-4">
+              {/* Drop area */}
+              <label className="border-2 border-dashed border-sky-300 hover:border-sky-500 bg-sky-50/40 hover:bg-sky-50/80 rounded-2xl p-6 text-center cursor-pointer transition-colors block">
+                <input
+                  type="file"
+                  accept=".pdf,.txt,.md"
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
+                <div className="flex flex-col items-center">
+                  <div className="p-3 bg-sky-100 text-sky-700 rounded-2xl mb-2">
+                    <FileText className="w-8 h-8" />
+                  </div>
+                  <span className="text-sm font-semibold text-slate-800">
+                    {file ? file.name : 'Click to select or drop your PDF lesson here'}
+                  </span>
+                  <span className="text-xs text-slate-500 mt-1">
+                    Accepts course PDFs, syllabi, and textbook chapters (up to 50MB)
+                  </span>
+                </div>
+              </label>
+
+              {loading && (
+                <div className="p-4 bg-sky-50 rounded-xl flex items-center justify-center space-x-3 text-sm text-sky-700 font-medium">
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  <span>Extracting page-by-page text for citation verification...</span>
+                </div>
+              )}
+
+              {extractedPreview && (
+                <div className="p-4 bg-emerald-50/80 border border-emerald-200 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between text-xs font-semibold text-emerald-800">
+                    <div className="flex items-center space-x-1.5">
+                      <Check className="w-4 h-4 text-emerald-600" />
+                      <span>Successfully Extracted {extractedPreview.totalPages} Pages</span>
+                    </div>
+                    <span className="text-emerald-700">Ready for AI processing</span>
+                  </div>
+                  <p className="text-xs text-slate-600 line-clamp-2 italic bg-white/80 p-2 rounded-lg border border-emerald-100 font-serif">
+                    "{extractedPreview.pages[0]?.text.slice(0, 160)}..."
+                  </p>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Lesson Title
+                  </label>
+                  <input
+                    type="text"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    placeholder="e.g. Chapter 5: Entrepreneurship"
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Course / Subject
+                  </label>
+                  <input
+                    type="text"
+                    value={subject}
+                    onChange={(e) => setSubject(e.target.value)}
+                    placeholder="e.g. Intro to Business Management"
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-xs text-slate-600 mb-2">
+                Choose one of these authentic course lessons equipped with real page citations to explore all three AI features immediately:
+              </p>
+
+              {DEFAULT_LESSONS.map((sample) => (
+                <div
+                  key={sample.id}
+                  onClick={() => handleSelectSample(sample)}
+                  className="p-3.5 border border-slate-200 hover:border-sky-400 bg-white hover:bg-sky-50/50 rounded-xl cursor-pointer transition-all flex items-start justify-between group shadow-sm"
+                >
+                  <div className="space-y-1">
+                    <div className="flex items-center space-x-2">
+                      <span className="text-xs font-bold text-slate-800 group-hover:text-sky-800">
+                        {sample.title}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500">{sample.subject}</p>
+                    <div className="flex items-center space-x-3 text-[11px] text-slate-400 pt-1">
+                      <span>{sample.totalPages} Pages</span>
+                      <span>•</span>
+                      <span className="text-emerald-700 font-medium">Page citations included</span>
+                    </div>
+                  </div>
+
+                  <button className="px-3 py-1.5 text-xs font-semibold bg-sky-50 group-hover:bg-sky-600 text-sky-700 group-hover:text-white rounded-lg transition-colors shrink-0">
+                    Use Lesson
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        {activeTab === 'upload' && (
+          <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
+            <span className="text-xs text-slate-500">
+              Files are saved locally to your student profile
+            </span>
+            <div className="flex space-x-2">
+              <button
+                onClick={onClose}
+                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-800 rounded-xl"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSubmit}
+                disabled={!extractedPreview || loading}
+                className="px-4 py-2 text-xs font-semibold bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white rounded-xl shadow-sm transition-all"
+              >
+                Save & Load Lesson
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
