@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   TrendingUp,
   Clock,
@@ -11,13 +11,20 @@ import {
   BarChart3,
   Calendar,
   Layers,
+  AlertCircle,
 } from 'lucide-react';
 import {
   getStudentProgress,
-  getQuizResults,
   getUserProfile,
 } from '../services/storage';
-import { StudentProgress, QuizResult } from '../types';
+import {
+  fetchStudyProgressFromSupabase,
+  fetchStudentQuizAttempts,
+  checkIsConfigured,
+  RawQuizAttemptRow,
+  DATA_UPDATED_EVENT,
+} from '../lib/supabase';
+import { StudentProgress } from '../types';
 
 interface MyProgressViewProps {
   onNavigateToQuiz: () => void;
@@ -30,14 +37,57 @@ export const MyProgressView: React.FC<MyProgressViewProps> = ({
   onNavigateToSummary,
   onNavigateToTimer,
 }) => {
-  const [progress] = useState<StudentProgress>(getStudentProgress());
-  const [quizHistory] = useState<QuizResult[]>(getQuizResults());
+  const [progress, setProgress] = useState<StudentProgress>(getStudentProgress());
+  const [dbQuizzes, setDbQuizzes] = useState<RawQuizAttemptRow[]>([]);
+  const [dbErrorMessage, setDbErrorMessage] = useState<string | null>(null);
   const user = getUserProfile();
+
+  useEffect(() => {
+    const refreshData = () => {
+      if (checkIsConfigured()) {
+        fetchStudyProgressFromSupabase().then((res) => {
+          if (res.error) {
+            console.error('Progress DB error:', res.error);
+            setDbErrorMessage((prev) => prev || res.error);
+          } else if (res.progress) {
+            setProgress(res.progress);
+          }
+        });
+        fetchStudentQuizAttempts().then((res) => {
+          if (res.error) {
+            console.error('Quiz DB error:', res.error);
+            setDbErrorMessage((prev) => prev || res.error);
+          } else if (res.attempts) {
+            setDbQuizzes(res.attempts);
+          }
+        });
+      }
+    };
+
+    refreshData();
+    window.addEventListener(DATA_UPDATED_EVENT, refreshData);
+    window.addEventListener('focus', refreshData);
+    return () => {
+      window.removeEventListener(DATA_UPDATED_EVENT, refreshData);
+      window.removeEventListener('focus', refreshData);
+    };
+  }, [user.id]);
 
   const studyHours = (progress.totalStudyMinutes / 60).toFixed(1);
 
   return (
     <div className="space-y-6 animate-fadeIn pb-12">
+      {/* Friendly DB notification if any */}
+      {dbErrorMessage && (
+        <div className="p-3.5 bg-amber-50 border border-amber-200 text-amber-900 rounded-2xl text-xs flex items-center space-x-2.5">
+          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+          <div>
+            <span className="font-bold">Database notification: </span>
+            <span>{dbErrorMessage}</span>
+          </div>
+        </div>
+      )}
+
       {/* Header bar */}
       <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-sm">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -146,7 +196,7 @@ export const MyProgressView: React.FC<MyProgressViewProps> = ({
           </div>
           <div className="space-y-0.5">
             <span className="text-3xl font-extrabold text-emerald-700">
-              {progress.verifiedCitationsCount || 12}
+              {progress.verifiedCitationsCount ?? 0}
             </span>
             <p className="text-[11px] text-slate-500 font-medium">citations checked with original</p>
           </div>
@@ -164,51 +214,56 @@ export const MyProgressView: React.FC<MyProgressViewProps> = ({
               </div>
               <h3 className="text-base font-bold text-slate-900">Quiz History & Retention</h3>
             </div>
-            <span className="text-xs font-semibold text-slate-400">Recent Attempts</span>
+            <span className="text-xs font-semibold text-slate-400">Supabase Records ({dbQuizzes.length})</span>
           </div>
 
-          {quizHistory.length === 0 ? (
+          {dbQuizzes.length === 0 ? (
             <div className="p-6 bg-slate-50 rounded-xl text-center text-xs text-slate-500 space-y-2">
-              <p>No practice quizzes completed yet.</p>
+              <p>No quiz attempts completed yet.</p>
               <button
                 onClick={onNavigateToQuiz}
-                className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg font-semibold inline-block"
+                className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg font-semibold inline-block cursor-pointer"
               >
                 Generate First Quiz
               </button>
             </div>
           ) : (
             <div className="space-y-3">
-              {quizHistory.map((q) => (
-                <div
-                  key={q.id}
-                  className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl flex items-center justify-between text-xs hover:border-indigo-200 transition-colors"
-                >
-                  <div className="space-y-0.5">
-                    <span className="font-bold text-slate-800 block text-sm">{q.lessonTitle}</span>
-                    <span className="text-slate-400 text-[11px]">
-                      {new Date(q.completedAt).toLocaleDateString()} • {q.totalQuestions} questions
-                    </span>
-                  </div>
+              {dbQuizzes.map((q) => {
+                const percentage = q.total_questions > 0 ? Math.round((q.score / q.total_questions) * 100) : 0;
+                const title = q.learning_materials?.title || q.learning_materials?.file_name || 'Practice Quiz';
+                const dateStr = q.created_at || q.completed_at ? new Date(q.created_at || q.completed_at!).toLocaleDateString() : 'Recent';
+                return (
+                  <div
+                    key={q.id}
+                    className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl flex items-center justify-between text-xs hover:border-indigo-200 transition-colors"
+                  >
+                    <div className="space-y-0.5">
+                      <span className="font-bold text-slate-800 block text-sm">{title}</span>
+                      <span className="text-slate-400 text-[11px]">
+                        {dateStr} • {q.total_questions} questions
+                      </span>
+                    </div>
 
-                  <div className="text-right">
-                    <span
-                      className={`text-base font-extrabold ${
-                        q.percentage >= 80
-                          ? 'text-emerald-600'
-                          : q.percentage >= 60
-                          ? 'text-indigo-600'
-                          : 'text-amber-600'
-                      }`}
-                    >
-                      {q.percentage}%
-                    </span>
-                    <span className="text-[11px] text-slate-500 block">
-                      {q.score} / {q.totalQuestions}
-                    </span>
+                    <div className="text-right">
+                      <span
+                        className={`text-base font-extrabold ${
+                          percentage >= 80
+                            ? 'text-emerald-600'
+                            : percentage >= 60
+                            ? 'text-indigo-600'
+                            : 'text-amber-600'
+                        }`}
+                      >
+                        {percentage}%
+                      </span>
+                      <span className="text-[11px] text-slate-500 block">
+                        {q.score} / {q.total_questions}
+                      </span>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

@@ -21,6 +21,8 @@ import { getStoredSummary, saveStoredSummary } from '../services/storage';
 import { PRECOMPUTED_SUMMARIES } from '../data/precomputedData';
 import { ResponsibleAiBanner } from './ResponsibleAiBanner';
 import { CitationModal } from './CitationModal';
+import { AudioTeachingPlayer } from './AudioTeachingPlayer';
+import { buildLessonAudioScript } from '../services/speech';
 
 interface SummarizeLessonViewProps {
   lesson: LessonDocument;
@@ -215,6 +217,15 @@ ${summary.quickReviewNotes
       {/* Summary Content */}
       {summary && (
         <div className="space-y-6">
+          {/* Audio Teaching for Uploaded Learning Material */}
+          <AudioTeachingPlayer
+            id={`audio-lesson-${lesson.id}`}
+            title={`Audio Teaching: ${lesson.title}`}
+            subtitle={`Listen to the core concepts and definitions of this ${lesson.subject} lesson — perfect for listening on shifts or commutes.`}
+            textToSpeak={buildLessonAudioScript(lesson.title, lesson.subject, summary, lesson.pages)}
+            variant="card"
+          />
+
           {/* Main Topic & Simple Explanation */}
           <div className="bg-white rounded-2xl border border-sky-100 p-6 shadow-sm relative overflow-hidden">
             <div className="absolute top-0 right-0 w-32 h-32 bg-sky-100/50 rounded-bl-full pointer-events-none" />

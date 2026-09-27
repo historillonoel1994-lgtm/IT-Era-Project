@@ -1,9 +1,12 @@
-import express, { Request, Response } from 'express';
+import express, { type Request, type Response } from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 import { PDFParse } from 'pdf-parse';
+import mammoth from 'mammoth';
+import * as xlsx from 'xlsx';
+import JSZip from 'jszip';
 
 dotenv.config();
 
@@ -102,51 +105,213 @@ function formatLessonContext(pages: { pageNumber: number | string; text: string 
     .join('\n\n');
 }
 
-// 1. PDF Parser Endpoint (Extracts page-by-page text)
-app.post('/api/parse-pdf', async (req: Request, res: Response) => {
-  let parser: PDFParse | null = null;
-  try {
-    const { pdfBase64, filename } = req.body;
-    if (!pdfBase64) {
-      return res.status(400).json({ error: 'No PDF data provided' });
+// XML entity decoder for OpenXML formats (docx, pptx)
+function decodeXmlEntities(str: string): string {
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'");
+}
+
+// Splits large text into academic page/section chunks (~1300 chars, ~250-300 words)
+function chunkTextIntoPages(
+  rawText: string,
+  prefix: string = 'Page',
+  targetChunkChars: number = 1300
+): { pageNumber: number; text: string }[] {
+  const paragraphs = rawText.split(/\n\s*\n/).filter((p) => p.trim().length > 0);
+  const pages: { pageNumber: number; text: string }[] = [];
+  let currentChunk = '';
+  let pageNum = 1;
+
+  for (const p of paragraphs) {
+    if (currentChunk.length + p.length > targetChunkChars && currentChunk.length > 0) {
+      pages.push({ pageNumber: pageNum++, text: currentChunk.trim() });
+      currentChunk = '';
     }
+    currentChunk += (currentChunk ? '\n\n' : '') + p.trim();
+  }
 
-    // Clean base64 header if present
-    const base64Data = pdfBase64.replace(/^data:application\/pdf;base64,/, '');
-    const dataBuffer = Buffer.from(base64Data, 'base64');
+  if (currentChunk.trim().length > 0) {
+    pages.push({ pageNumber: pageNum, text: currentChunk.trim() });
+  }
 
-    parser = new PDFParse({ data: dataBuffer });
-    const textResult = await parser.getText();
+  return pages.length > 0
+    ? pages
+    : [{ pageNumber: 1, text: rawText.trim() || 'No readable text content found.' }];
+}
 
-    const pages = (textResult.pages || []).map((p, idx) => ({
-      pageNumber: p.num || idx + 1,
-      text: p.text.trim().length > 0 ? p.text.trim() : `[Page ${p.num || idx + 1} contains diagrams, charts, or scanned figures]`,
-    }));
+// 1. Multi-format Document Parser Endpoint (PDF, DOCX/DOC, PPTX/PPT, XLSX/CSV, TXT/MD)
+app.post(['/api/parse-document', '/api/parse-pdf'], async (req: Request, res: Response) => {
+  const { fileBase64, pdfBase64, filename, fileType } = req.body;
+  const rawBase64 = fileBase64 || pdfBase64;
+  if (!rawBase64) {
+    return res.status(400).json({ error: 'No document data provided' });
+  }
 
-    const finalPages = pages.length > 0 ? pages : [
-      { pageNumber: 1, text: textResult.text?.trim() || 'No readable text could be extracted.' }
-    ];
+  const safeFilename = filename || 'Uploaded_Document';
+  const cleanBase64 = rawBase64.replace(/^data:[^;]+;base64,/, '');
+  const dataBuffer = Buffer.from(cleanBase64, 'base64');
+  const ext = (safeFilename.split('.').pop() || '').toLowerCase();
+
+  let finalPages: { pageNumber: number; text: string }[] = [];
+  let detectedType = ext || 'document';
+
+  try {
+    // 1. PDF Documents (.pdf)
+    if (ext === 'pdf') {
+      detectedType = 'pdf';
+      let parser: PDFParse | null = null;
+      try {
+        parser = new PDFParse({ data: dataBuffer });
+        const textResult = await parser.getText();
+        const pages = (textResult.pages || []).map((p, idx) => ({
+          pageNumber: p.num || idx + 1,
+          text: p.text.trim().length > 0
+            ? p.text.trim()
+            : `[Page ${p.num || idx + 1} contains diagrams, charts, or visual figures]`,
+        }));
+        finalPages = pages.length > 0 ? pages : [
+          { pageNumber: 1, text: textResult.text?.trim() || 'No readable text could be extracted.' }
+        ];
+      } finally {
+        if (parser) {
+          try { await parser.destroy(); } catch (e) {}
+        }
+      }
+    }
+    // 2. Microsoft Word Documents (.docx, .doc)
+    else if (ext === 'docx' || ext === 'doc') {
+      detectedType = 'docx';
+      try {
+        const docxResult = await mammoth.extractRawText({ buffer: dataBuffer });
+        const text = docxResult.value || '';
+        finalPages = chunkTextIntoPages(text, 'Page', 1300);
+      } catch (docErr: any) {
+        // Fallback for older .doc binary format
+        const rawText = dataBuffer.toString('utf-8').replace(/[^\x20-\x7E\n\r\t]/g, ' ');
+        if (rawText.replace(/\s+/g, '').length > 100) {
+          finalPages = chunkTextIntoPages(rawText, 'Section', 1200);
+        } else {
+          throw new Error(`Could not parse Word document: ${docErr.message}`);
+        }
+      }
+    }
+    // 3. PowerPoint Presentations (.pptx, .ppt)
+    else if (ext === 'pptx' || ext === 'ppt') {
+      detectedType = 'pptx';
+      try {
+        const zip = await JSZip.loadAsync(dataBuffer);
+        const slideFiles = Object.keys(zip.files).filter((name) =>
+          /^ppt\/slides\/slide\d+\.xml$/i.test(name)
+        );
+
+        slideFiles.sort((a, b) => {
+          const numA = parseInt(a.match(/slide(\d+)\.xml/i)?.[1] || '0', 10);
+          const numB = parseInt(b.match(/slide(\d+)\.xml/i)?.[1] || '0', 10);
+          return numA - numB;
+        });
+
+        const pages: { pageNumber: number; text: string }[] = [];
+        for (let i = 0; i < slideFiles.length; i++) {
+          const slideFileName = slideFiles[i];
+          const slideXml = await zip.files[slideFileName].async('text');
+          const slideNum = i + 1;
+
+          // Extract slide texts from OpenXML tags
+          const textMatches = slideXml.match(/<a:t[^>]*>([\s\S]*?)<\/a:t>/gi) || [];
+          const slideTexts = textMatches
+            .map((m) => decodeXmlEntities(m.replace(/<[^>]+>/g, '')).trim())
+            .filter((t) => t.length > 0);
+
+          // Check for presenter notes
+          let notesText = '';
+          const noteFileName = `ppt/notesSlides/notesSlide${slideNum}.xml`;
+          if (zip.files[noteFileName]) {
+            const noteXml = await zip.files[noteFileName].async('text');
+            const noteMatches = noteXml.match(/<a:t[^>]*>([\s\S]*?)<\/a:t>/gi) || [];
+            notesText = noteMatches
+              .map((m) => decodeXmlEntities(m.replace(/<[^>]+>/g, '')).trim())
+              .filter((t) => t.length > 0)
+              .join(' ');
+          }
+
+          const slideContent = [
+            `[Slide ${slideNum}]`,
+            slideTexts.join('\n'),
+            notesText ? `\n(Presenter Notes: ${notesText})` : '',
+          ].filter(Boolean).join('\n');
+
+          pages.push({
+            pageNumber: slideNum,
+            text: slideContent.trim().length > 0
+              ? slideContent.trim()
+              : `[Slide ${slideNum} - Diagrams, charts, or visual slide]`,
+          });
+        }
+
+        finalPages = pages.length > 0 ? pages : [{ pageNumber: 1, text: 'No text extracted from presentation slides.' }];
+      } catch (pptErr: any) {
+        throw new Error(`Failed to parse presentation: ${pptErr.message}`);
+      }
+    }
+    // 4. Spreadsheets & CSV (.xlsx, .xls, .csv, .tsv)
+    else if (ext === 'xlsx' || ext === 'xls' || ext === 'csv' || ext === 'tsv') {
+      detectedType = ext === 'csv' || ext === 'tsv' ? 'csv' : 'xlsx';
+      try {
+        const workbook = xlsx.read(dataBuffer, { type: 'buffer' });
+        const pages: { pageNumber: number; text: string }[] = [];
+        let pageNum = 1;
+
+        for (const sheetName of workbook.SheetNames) {
+          const worksheet = workbook.Sheets[sheetName];
+          const csvText = xlsx.utils.sheet_to_csv(worksheet);
+          if (!csvText || !csvText.trim()) continue;
+
+          const rows = csvText.split('\n').filter((r) => r.trim().length > 0);
+          if (rows.length === 0) continue;
+
+          const CHUNK_SIZE = 30;
+          for (let r = 0; r < rows.length; r += CHUNK_SIZE) {
+            const chunkRows = rows.slice(r, r + CHUNK_SIZE);
+            const startRow = r + 1;
+            const endRow = Math.min(r + CHUNK_SIZE, rows.length);
+            const rowLabel = rows.length > CHUNK_SIZE ? ` (Rows ${startRow}-${endRow} of ${rows.length})` : '';
+            pages.push({
+              pageNumber: pageNum++,
+              text: `Spreadsheet Sheet: "${sheetName}"${rowLabel}\n\n${chunkRows.join('\n')}`,
+            });
+          }
+        }
+
+        finalPages = pages.length > 0 ? pages : [{ pageNumber: 1, text: 'Spreadsheet contains no readable rows.' }];
+      } catch (sheetErr: any) {
+        throw new Error(`Failed to parse spreadsheet: ${sheetErr.message}`);
+      }
+    }
+    // 5. Plain text, Markdown, RTF, JSON, Code files (.txt, .md, .rtf, .json, etc.)
+    else {
+      detectedType = ext || 'txt';
+      const text = dataBuffer.toString('utf-8');
+      finalPages = chunkTextIntoPages(text, 'Section', 1200);
+    }
 
     res.json({
       success: true,
       totalPages: finalPages.length,
       pages: finalPages,
-      filename: filename || 'Uploaded_Document.pdf',
+      filename: safeFilename,
+      fileType: detectedType,
     });
   } catch (error: any) {
-    console.error('Error parsing PDF:', error);
+    console.error('Error parsing document:', error);
     res.status(500).json({
-      error: 'Failed to parse PDF document. Please make sure the file is a valid PDF.',
+      error: `Failed to extract contents from ${safeFilename}.`,
       details: error.message,
     });
-  } finally {
-    if (parser) {
-      try {
-        await parser.destroy();
-      } catch (e) {
-        // ignore cleanup error
-      }
-    }
   }
 });
 
@@ -367,7 +532,7 @@ RESPONSIBLE AI SAFEGUARDS & CRITICAL RULES:
   }
 });
 
-// 4. FEATURE 3: Ask Study Buddy (AI Tutor)
+// 4. FEATURE 3: Ask Study Buddy (AI Tutor) - Two-Source Answer System
 app.post('/api/ask-tutor', async (req: Request, res: Response) => {
   try {
     const { pages, lessonTitle, question, chatHistory = [] } = req.body;
@@ -380,13 +545,17 @@ app.post('/api/ask-tutor', async (req: Request, res: Response) => {
 
     const lessonContext = formatLessonContext(pages);
 
-    // Format previous turns for context
+    // Format previous turns for context so follow-ups work smoothly
     const previousTurns = chatHistory
       .slice(-6)
       .map((msg: any) => `${msg.sender === 'user' ? 'Student' : 'Study Buddy'}: ${msg.text}`)
       .join('\n');
 
     const prompt = `You are "ASK STUDY BUDDY", a friendly, patient, and empowering AI tutor specifically built for working college students who balance work shifts and academic studies.
+
+You operate a TWO-SOURCE ANSWER SYSTEM:
+1. Uploaded Learning Material (Strictly verified against uploaded document pages)
+2. Gemini / Google AI General Knowledge (For topics outside the uploaded material)
 
 LESSON TITLE: ${lessonTitle || 'Uploaded Learning Material'}
 
@@ -399,44 +568,161 @@ ${previousTurns || 'No previous messages'}
 STUDENT QUESTION:
 "${question}"
 
-CRITICAL RESPONSIBLE AI SAFEGUARDS (MUST BE STRICTLY FOLLOWED):
-1. Carefully search the uploaded lesson text before formulating your answer.
-2. The answer MUST be simple, clear, student-friendly, and based strictly on the uploaded lesson.
-3. Whenever possible, conclude or support your explanation with the exact source page number: "[Source: Page X]".
-4. SAFEGUARD CLAUSE: If the student asks a question whose answer CANNOT be found, confirmed, or substantiated in the uploaded learning material, DO NOT guess or make up an answer.
-In that case, you MUST explicitly display this exact safeguard statement:
-"I could not find enough information in your uploaded lesson to answer this confidently. Please check your original lesson or ask your instructor."
-You may add a gentle suggestion of what related topic is present in the lesson, but NEVER fabricate unsupported facts.
-5. If the question asks for an example, step-by-step breakdown, or definition, ground your examples in the concepts taught in the text.`;
+TWO-SOURCE EVALUATION PROCESS:
+STEP 1: Carefully examine the uploaded lesson pages above to see whether the student's question can be answered from or is sufficiently supported by the uploaded learning materials.
+
+STEP 2:
+• PATH A — IF SUPPORTED BY THE UPLOADED LEARNING MATERIAL:
+  1. Set sourceType to "material".
+  2. Set isSupportedByMaterial to true.
+  3. Formulate the answer based STRICTLY AND ONLY on the facts, concepts, and definitions found in the uploaded lesson pages.
+  4. Identify the exact source page number where the answer/concept appears (set sourcePage to that integer, e.g. 1, 2, 3).
+  5. Provide an exact citationExcerpt: a short verifiable sentence or clause quoted directly from that page.
+  6. Leave sourceNotice empty.
+
+• PATH B — IF NOT FOUND OR NOT SUFFICIENTLY SUPPORTED BY THE UPLOADED LEARNING MATERIAL:
+  (For example: broad general topics not discussed in the text, outside academic subjects, definitions of terms not present in the document, or concepts beyond the text scope)
+  1. Set sourceType to "gemini".
+  2. Set isSupportedByMaterial to false.
+  3. Set sourceNotice to: "This question is not covered by your uploaded learning materials. The answer below is provided using Gemini / Google AI general knowledge."
+  4. Formulate a comprehensive, warm, student-friendly answer using Gemini / Google AI general knowledge. Include clear explanations and concrete examples or step-by-step guidance as appropriate.
+  5. DO NOT provide or fabricate any page numbers or quotes from the uploaded lesson. Set sourcePage to 0 or null, and citationExcerpt to "".`;
 
     const response = await generateContentWithRetry({
       preferredModel: PRIMARY_MODEL,
       contents: prompt,
       config: {
-        systemInstruction: 'You are Study Buddy AI, an empathetic and strictly grounded tutor for working students.',
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            sourceType: {
+              type: Type.STRING,
+              description: 'Must be either "material" or "gemini"',
+            },
+            isSupportedByMaterial: {
+              type: Type.BOOLEAN,
+              description: 'True if answered from uploaded learning material, false if outside material',
+            },
+            sourceNotice: {
+              type: Type.STRING,
+              description:
+                'If sourceType is "gemini", MUST be exactly: "This question is not covered by your uploaded learning materials. The answer below is provided using Gemini / Google AI general knowledge." If "material", empty.',
+            },
+            answer: {
+              type: Type.STRING,
+              description: 'The educational answer/explanation for the student',
+            },
+            sourcePage: {
+              type: Type.INTEGER,
+              description: 'The exact page number from the uploaded material if sourceType is "material". Null or 0 if "gemini".',
+            },
+            citationExcerpt: {
+              type: Type.STRING,
+              description: 'Direct quote from the source page if sourceType is "material". Empty if "gemini".',
+            },
+          },
+          required: ['sourceType', 'isSupportedByMaterial', 'answer'],
+        },
+      },
+    });
+
+    const rawText = cleanJsonString(response.text || '{}');
+    let parsed: any = {};
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      parsed = {
+        sourceType: 'material',
+        isSupportedByMaterial: true,
+        answer: response.text || '',
+      };
+    }
+
+    const isGemini = parsed.sourceType === 'gemini' || parsed.isSupportedByMaterial === false;
+    const sourceType = isGemini ? 'gemini' : 'material';
+    const sourceLabel = isGemini ? 'Source: Gemini / Google AI' : 'Source: Uploaded Learning Material';
+    const indicator = isGemini ? '✨ Gemini / Google AI' : '📘 Uploaded Learning Material';
+    const sourceNotice = isGemini
+      ? (parsed.sourceNotice || 'This question is not covered by your uploaded learning materials. The answer below is provided using Gemini / Google AI general knowledge.')
+      : undefined;
+
+    const sourcePage = !isGemini && parsed.sourcePage && Number(parsed.sourcePage) > 0
+      ? Number(parsed.sourcePage)
+      : undefined;
+    const citationExcerpt = !isGemini ? (parsed.citationExcerpt || undefined) : undefined;
+
+    res.json({
+      success: true,
+      sourceType,
+      sourceLabel,
+      indicator,
+      sourceNotice,
+      answer: parsed.answer || '',
+      sourcePage,
+      citationExcerpt,
+      lessonTitle: lessonTitle || 'Uploaded Learning Material',
+    });
+  } catch (error: any) {
+    console.error('Error in AI Tutor:', error);
+    res.status(500).json({
+      error: 'Study Buddy could not answer right now. Please try again.',
+      details: error.message,
+    });
+  }
+});
+
+// 4b. FEATURE 3b: Ask Study Buddy (General AI Question)
+app.post('/api/ask-general', async (req: Request, res: Response) => {
+  try {
+    const { question, chatHistory = [] } = req.body;
+    if (!question || typeof question !== 'string') {
+      return res.status(400).json({ error: 'Please enter a question for Study Buddy' });
+    }
+
+    // Format previous turns for context
+    const previousTurns = chatHistory
+      .slice(-6)
+      .map((msg: any) => `${msg.sender === 'user' ? 'Student' : 'Study Buddy'}: ${msg.text}`)
+      .join('\n');
+
+    const prompt = `You are "ASK STUDY BUDDY", a friendly, patient, and encouraging AI educational tutor for college students.
+The student is asking an academic or general knowledge question answered using Gemini / Google AI general knowledge.
+
+RECENT CHAT CONTEXT:
+${previousTurns || 'No previous messages'}
+
+STUDENT QUESTION:
+"${question}"
+
+CRITICAL INSTRUCTIONS FOR GENERAL AI ANSWERS:
+1. Provide a student-friendly, warm, clear, and encouraging explanation.
+2. Use short, readable paragraphs and bullet points where helpful.
+3. Include concrete real-world examples or step-by-step breakdowns when relevant.
+4. Do NOT mention false page numbers or claim this comes from an uploaded lesson.`;
+
+    const response = await generateContentWithRetry({
+      preferredModel: PRIMARY_MODEL,
+      contents: prompt,
+      config: {
+        systemInstruction: 'You are Study Buddy AI, providing clear, concise, and helpful general educational explanations for students.',
       },
     });
 
     const responseText = response.text || '';
 
-    // Check if safeguard refusal was triggered
-    const isSafeguardTriggered = responseText.includes('I could not find enough information in your uploaded lesson') ||
-      responseText.includes('check your original lesson or ask your instructor');
-
-    // Extract page number if present in text
-    const pageMatch = responseText.match(/\[?Source:\s*Page\s*(\d+)\]?/i) || responseText.match(/Page\s*(\d+)/i);
-    const sourcePage = pageMatch ? Number(pageMatch[1]) : undefined;
-
     res.json({
       success: true,
+      sourceType: 'gemini',
+      sourceLabel: 'Source: Gemini / Google AI',
+      indicator: '✨ Gemini / Google AI',
+      sourceNotice: 'This question is not covered by your uploaded learning materials. The answer below is provided using Gemini / Google AI general knowledge.',
       answer: responseText,
-      sourcePage: sourcePage,
-      isSafeguardTriggered,
     });
   } catch (error: any) {
-    console.error('Error in AI Tutor:', error);
+    console.error('Error in General AI Question:', error);
     res.status(500).json({
-      error: 'Study Buddy encountered a momentary connection issue. Please try again.',
+      error: 'Study Buddy could not answer right now. Please try again.',
       details: error.message,
     });
   }

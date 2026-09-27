@@ -1,9 +1,33 @@
-import React, { useState } from 'react';
-import { X, Upload, FileText, Check, AlertCircle, BookOpen, Sparkles, Loader2 } from 'lucide-react';
+import React, { useState, useRef } from 'react';
+import {
+  X,
+  Upload,
+  FileText,
+  Check,
+  AlertCircle,
+  BookOpen,
+  Sparkles,
+  Loader2,
+  Presentation,
+  Table,
+  FileSpreadsheet,
+  FileType,
+  File,
+  CheckCircle2,
+} from 'lucide-react';
 import { LessonDocument } from '../types';
 import { DEFAULT_LESSONS } from '../data/defaultLessons';
-import { parsePdfFile } from '../services/api';
+import { parseDocumentFile } from '../services/api';
 import { addLesson } from '../services/storage';
+import {
+  supabase,
+  checkIsConfigured,
+  STORAGE_BUCKET,
+  setCurrentLearningMaterialId,
+  ensureUserProfileAndProgress,
+  notifyDataChanged,
+} from '../lib/supabase';
+import { AudioTeachingPlayer } from './AudioTeachingPlayer';
 
 interface UploadLessonModalProps {
   isOpen: boolean;
@@ -16,15 +40,46 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
   onClose,
   onLessonUploaded,
 }) => {
+  const isSubmittingRef = useRef(false);
   const [activeTab, setActiveTab] = useState<'upload' | 'samples'>('upload');
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState('');
   const [subject, setSubject] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [extractedPreview, setExtractedPreview] = useState<{ totalPages: number; pages: { pageNumber: number; text: string }[] } | null>(null);
+  const [extractedPreview, setExtractedPreview] = useState<{
+    totalPages: number;
+    pages: { pageNumber: number; text: string }[];
+    fileType?: string;
+  } | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<string>('');
+  const [isSavedConfirmed, setIsSavedConfirmed] = useState<boolean>(false);
 
   if (!isOpen) return null;
+
+  const getFormatBadge = (filename?: string) => {
+    if (!filename) return null;
+    const ext = (filename.split('.').pop() || '').toLowerCase();
+    if (ext === 'pdf') {
+      return { label: 'PDF Document', color: 'bg-red-100 text-red-800 border-red-200', icon: FileText, unit: 'Pages' };
+    }
+    if (ext === 'docx' || ext === 'doc') {
+      return { label: 'Word Document', color: 'bg-blue-100 text-blue-800 border-blue-200', icon: FileText, unit: 'Pages' };
+    }
+    if (ext === 'pptx' || ext === 'ppt') {
+      return { label: 'PowerPoint Deck', color: 'bg-amber-100 text-amber-800 border-amber-200', icon: Presentation, unit: 'Slides' };
+    }
+    if (ext === 'xlsx' || ext === 'xls') {
+      return { label: 'Excel Spreadsheet', color: 'bg-emerald-100 text-emerald-800 border-emerald-200', icon: FileSpreadsheet, unit: 'Sheets' };
+    }
+    if (ext === 'csv' || ext === 'tsv') {
+      return { label: 'CSV Data Sheet', color: 'bg-teal-100 text-teal-800 border-teal-200', icon: Table, unit: 'Sections' };
+    }
+    if (ext === 'txt' || ext === 'md' || ext === 'markdown') {
+      return { label: 'Study Notes / Text', color: 'bg-slate-100 text-slate-800 border-slate-200', icon: FileType, unit: 'Sections' };
+    }
+    return { label: ext.toUpperCase() + ' File', color: 'bg-sky-100 text-sky-800 border-sky-200', icon: File, unit: 'Sections' };
+  };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     setError(null);
@@ -39,79 +94,167 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
       setSubject('General College Course');
     }
 
-    // If PDF, parse it immediately to show preview
-    if (selectedFile.type === 'application/pdf' || selectedFile.name.endsWith('.pdf')) {
-      setLoading(true);
-      try {
-        const reader = new FileReader();
-        reader.onload = async () => {
-          try {
-            const base64 = reader.result as string;
-            const parsed = await parsePdfFile(base64, selectedFile.name);
-            setExtractedPreview(parsed);
-          } catch (err: any) {
-            setError(err.message || 'Could not parse PDF. You can still paste or select a sample.');
-          } finally {
-            setLoading(false);
-          }
-        };
-        reader.readAsDataURL(selectedFile);
-      } catch (err: any) {
-        setError(err.message);
-        setLoading(false);
-      }
-    } else if (selectedFile.name.endsWith('.txt') || selectedFile.name.endsWith('.md')) {
-      // Text file extraction
-      setLoading(true);
+    setLoading(true);
+    try {
       const reader = new FileReader();
-      reader.onload = () => {
-        const text = reader.result as string;
-        // Split roughly into 500-word pseudo-pages
-        const paragraphs = text.split('\n\n');
-        const pages: { pageNumber: number; text: string }[] = [];
-        let cur = '';
-        let pageNum = 1;
-        for (const p of paragraphs) {
-          cur += p + '\n\n';
-          if (cur.length > 1200) {
-            pages.push({ pageNumber: pageNum++, text: cur.trim() });
-            cur = '';
-          }
+      reader.onload = async () => {
+        try {
+          const base64 = reader.result as string;
+          const parsed = await parseDocumentFile(base64, selectedFile.name, selectedFile.type);
+          setExtractedPreview({
+            totalPages: parsed.totalPages,
+            pages: parsed.pages,
+            fileType: parsed.fileType,
+          });
+        } catch (err: any) {
+          setError(err.message || 'Could not parse document. Please check the file.');
+        } finally {
+          setLoading(false);
         }
-        if (cur.trim().length > 0) {
-          pages.push({ pageNumber: pageNum, text: cur.trim() });
-        }
-        setExtractedPreview({
-          totalPages: pages.length || 1,
-          pages: pages.length > 0 ? pages : [{ pageNumber: 1, text }],
-        });
+      };
+      reader.onerror = () => {
+        setError('Failed to read the local file from disk.');
         setLoading(false);
       };
-      reader.readAsText(selectedFile);
-    } else {
-      setError('Please upload a PDF (.pdf) or text (.txt) document.');
+      reader.readAsDataURL(selectedFile);
+    } catch (err: any) {
+      setError(err.message);
+      setLoading(false);
     }
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
+    if (isSubmittingRef.current || loading) return;
     if (!extractedPreview || extractedPreview.pages.length === 0) {
-      setError('Please select a valid PDF file with readable text content.');
+      setError('Please select a valid study document with readable text content.');
       return;
     }
+    isSubmittingRef.current = true;
 
+    const lessonId = `lesson-${Date.now()}`;
+    const ext = (file?.name.split('.').pop() || '').toLowerCase();
+    const lessonTitle = title.trim() || file?.name || 'Untitled Lesson Material';
     const newLesson: LessonDocument = {
-      id: `lesson-${Date.now()}`,
-      title: title.trim() || file?.name || 'Untitled Lesson Material',
+      id: lessonId,
+      title: lessonTitle,
       subject: subject.trim() || 'General Course',
       totalPages: extractedPreview.totalPages,
       uploadedAt: new Date().toISOString(),
       pages: extractedPreview.pages,
       isSample: false,
+      fileType: extractedPreview.fileType || ext,
+      fileName: file?.name,
     };
+
+    // When a file is uploaded, enforce authenticated user save
+    if (file) {
+      setLoading(true);
+      setError(null);
+      setIsSavedConfirmed(false);
+      setUploadStatus(`Authenticating student session...`);
+
+      // 1. AUTHENTICATED USER
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (!user) {
+        setLoading(false);
+        isSubmittingRef.current = false;
+        setUploadStatus('');
+        setError('Please sign in to save your activity.');
+        return;
+      }
+
+      try {
+        await ensureUserProfileAndProgress(user);
+        setUploadStatus(`Uploading ${file.name} to ${STORAGE_BUCKET}...`);
+
+        const cleanFileName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const storagePath = `${user.id}/${Date.now()}_${cleanFileName}`;
+
+        // Upload to storage bucket
+        const { error: uploadError } = await supabase.storage
+          .from(STORAGE_BUCKET)
+          .upload(storagePath, file, {
+            cacheControl: '3600',
+            upsert: true,
+          });
+
+        if (uploadError) {
+          console.error('Storage upload failed:', uploadError);
+          setError(`Storage upload failed: ${uploadError.message}`);
+          setLoading(false);
+          isSubmittingRef.current = false;
+          setUploadStatus('');
+          return;
+        }
+
+        // 2. LEARNING MATERIAL DATABASE SAVE
+        // Immediately insert its information into learning_materials
+        // Use exact existing columns: user_id, title, file_name, file_path, total_pages
+        setUploadStatus(`Registering record in learning_materials...`);
+        const { data: material, error: materialError } = await supabase
+          .from('learning_materials')
+          .insert({
+            user_id: user.id,
+            title: lessonTitle || file.name,
+            file_name: file.name,
+            file_path: storagePath,
+            total_pages: extractedPreview.totalPages || null,
+          })
+          .select()
+          .single();
+
+        if (materialError) {
+          console.error(
+            'Learning material database save failed:',
+            materialError
+          );
+          console.error('Material DB error:', materialError);
+          setError(`Learning material database save failed: ${materialError.message}`);
+          setIsSavedConfirmed(false);
+          setLoading(false);
+          isSubmittingRef.current = false;
+          setUploadStatus('');
+          // DO NOT show "Saved".
+          return;
+        }
+
+        // If successful: store material.id as the current learning material ID.
+        if (material?.id) {
+          setCurrentLearningMaterialId(material.id);
+          newLesson.id = material.id;
+          newLesson.filePath = storagePath;
+        }
+
+        // Only display "Saved" after Supabase confirms the insert succeeded.
+        setIsSavedConfirmed(true);
+        setUploadStatus('Saved');
+        notifyDataChanged();
+      } catch (err: any) {
+        console.error('Learning material database save failed:', err);
+        console.error('Material DB error:', err);
+        setError(err.message || 'Failed to save learning material.');
+        setIsSavedConfirmed(false);
+        setLoading(false);
+        isSubmittingRef.current = false;
+        setUploadStatus('');
+        return;
+      } finally {
+        setLoading(false);
+        isSubmittingRef.current = false;
+      }
+    }
 
     addLesson(newLesson);
     onLessonUploaded(newLesson);
-    onClose();
+
+    // Give visual confirmation of the Saved status before closing
+    setTimeout(() => {
+      onClose();
+    }, 600);
   };
 
   const handleSelectSample = (sample: LessonDocument) => {
@@ -119,6 +262,9 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
     onLessonUploaded(sample);
     onClose();
   };
+
+  const currentBadge = getFormatBadge(file?.name);
+  const CurrentIcon = currentBadge?.icon || FileText;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn">
@@ -132,7 +278,7 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
             <div>
               <h3 className="font-bold text-base text-white">Upload Learning Material</h3>
               <p className="text-xs text-sky-200/80">
-                Add your PDF textbook, syllabus, or lecture notes
+                Supports PDF, Word (DOCX), PowerPoint (PPTX), Excel/CSV & Text
               </p>
             </div>
           </div>
@@ -154,7 +300,7 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
                 : 'border-transparent text-slate-500 hover:text-slate-800'
             }`}
           >
-            Upload University PDF
+            Upload Course Material
           </button>
           <button
             onClick={() => setActiveTab('samples')}
@@ -180,31 +326,46 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
 
           {activeTab === 'upload' ? (
             <div className="space-y-4">
+              {/* Supported formats showcase bar */}
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-600 pb-1">
+                <span className="font-semibold text-slate-700">Supported:</span>
+                <span className="px-2 py-0.5 bg-red-50 text-red-700 rounded-md border border-red-100 font-medium">.PDF</span>
+                <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded-md border border-blue-100 font-medium">.DOCX / .DOC</span>
+                <span className="px-2 py-0.5 bg-amber-50 text-amber-800 rounded-md border border-amber-100 font-medium">.PPTX / .PPT</span>
+                <span className="px-2 py-0.5 bg-emerald-50 text-emerald-800 rounded-md border border-emerald-100 font-medium">.XLSX / .CSV</span>
+                <span className="px-2 py-0.5 bg-slate-100 text-slate-700 rounded-md border border-slate-200 font-medium">.TXT / .MD</span>
+              </div>
+
               {/* Drop area */}
               <label className="border-2 border-dashed border-sky-300 hover:border-sky-500 bg-sky-50/40 hover:bg-sky-50/80 rounded-2xl p-6 text-center cursor-pointer transition-colors block">
                 <input
                   type="file"
-                  accept=".pdf,.txt,.md"
+                  accept=".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.csv,.tsv,.txt,.md,.markdown,.rtf"
                   onChange={handleFileChange}
                   className="hidden"
                 />
                 <div className="flex flex-col items-center">
                   <div className="p-3 bg-sky-100 text-sky-700 rounded-2xl mb-2">
-                    <FileText className="w-8 h-8" />
+                    <CurrentIcon className="w-8 h-8" />
                   </div>
                   <span className="text-sm font-semibold text-slate-800">
-                    {file ? file.name : 'Click to select or drop your PDF lesson here'}
+                    {file ? file.name : 'Click to select or drop your course material here'}
                   </span>
                   <span className="text-xs text-slate-500 mt-1">
-                    Accepts course PDFs, syllabi, and textbook chapters (up to 50MB)
+                    Accepts PDFs, Word docs, PowerPoint presentations, Excel spreadsheets, CSVs, and notes (up to 50MB)
                   </span>
+                  {currentBadge && (
+                    <span className={`mt-2 px-2.5 py-0.5 rounded-full text-xs font-semibold border ${currentBadge.color}`}>
+                      Detected: {currentBadge.label}
+                    </span>
+                  )}
                 </div>
               </label>
 
               {loading && (
                 <div className="p-4 bg-sky-50 rounded-xl flex items-center justify-center space-x-3 text-sm text-sky-700 font-medium">
                   <Loader2 className="w-5 h-5 animate-spin" />
-                  <span>Extracting page-by-page text for citation verification...</span>
+                  <span>Extracting sections and citation pages for AI practice...</span>
                 </div>
               )}
 
@@ -213,26 +374,39 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
                   <div className="flex items-center justify-between text-xs font-semibold text-emerald-800">
                     <div className="flex items-center space-x-1.5">
                       <Check className="w-4 h-4 text-emerald-600" />
-                      <span>Successfully Extracted {extractedPreview.totalPages} Pages</span>
+                      <span>
+                        Successfully Extracted {extractedPreview.totalPages}{' '}
+                        {currentBadge?.unit || 'Pages'}
+                      </span>
                     </div>
-                    <span className="text-emerald-700">Ready for AI processing</span>
+                    <span className="text-emerald-700 font-medium">Ready for AI processing</span>
                   </div>
                   <p className="text-xs text-slate-600 line-clamp-2 italic bg-white/80 p-2 rounded-lg border border-emerald-100 font-serif">
-                    "{extractedPreview.pages[0]?.text.slice(0, 160)}..."
+                    "{extractedPreview.pages[0]?.text.slice(0, 180)}..."
                   </p>
+
+                  <div className="pt-2">
+                    <AudioTeachingPlayer
+                      id="upload-preview-audio"
+                      title={`Audio Teaching Preview: ${title || file?.name || 'Uploaded Material'}`}
+                      subtitle="Listen to a preview of your uploaded material before finishing upload."
+                      textToSpeak={`Here is the introductory excerpt from your uploaded material ${title || file?.name || ''}: ${extractedPreview.pages[0]?.text.slice(0, 350)}`}
+                      variant="compact"
+                    />
+                  </div>
                 </div>
               )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Lesson Title
+                    Material / Lesson Title
                   </label>
                   <input
                     type="text"
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
-                    placeholder="e.g. Chapter 5: Entrepreneurship"
+                    placeholder="e.g. Lecture 4: Database Normalization"
                     className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500"
                   />
                 </div>
@@ -244,7 +418,7 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
                     type="text"
                     value={subject}
                     onChange={(e) => setSubject(e.target.value)}
-                    placeholder="e.g. Intro to Business Management"
+                    placeholder="e.g. Information Management"
                     className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500"
                   />
                 </div>
@@ -287,23 +461,42 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
 
         {/* Footer */}
         {activeTab === 'upload' && (
-          <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
-            <span className="text-xs text-slate-500">
-              Files are saved locally to your student profile
-            </span>
-            <div className="flex space-x-2">
+          <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3">
+            <div className="flex items-center space-x-2 text-xs">
+              {isSavedConfirmed ? (
+                <span className="inline-flex items-center space-x-1.5 px-3 py-1 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-full font-bold">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Saved</span>
+                </span>
+              ) : uploadStatus ? (
+                <div className="flex items-center space-x-1.5 text-sky-700 font-medium">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-600" />
+                  <span>{uploadStatus}</span>
+                </div>
+              ) : error ? (
+                <div className="flex items-center space-x-1.5 text-red-600 font-medium">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{error}</span>
+                </div>
+              ) : (
+                <span className="text-slate-500">Ready to upload to study-buddy-materials</span>
+              )}
+            </div>
+            <div className="flex space-x-2 shrink-0">
               <button
                 onClick={onClose}
-                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-800 rounded-xl"
+                disabled={loading}
+                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-800 rounded-xl cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 onClick={handleSubmit}
                 disabled={!extractedPreview || loading}
-                className="px-4 py-2 text-xs font-semibold bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white rounded-xl shadow-sm transition-all"
+                className="px-4 py-2 text-xs font-semibold bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white rounded-xl shadow-sm transition-all cursor-pointer flex items-center space-x-1.5"
               >
-                Save & Load Lesson
+                {loading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>Save & Load Lesson</span>
               </button>
             </div>
           </div>

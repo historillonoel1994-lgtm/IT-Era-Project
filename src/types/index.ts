@@ -21,6 +21,9 @@ export interface LessonDocument {
   uploadedAt: string;
   pages: LessonPage[];
   isSample?: boolean;
+  fileType?: 'pdf' | 'docx' | 'doc' | 'pptx' | 'ppt' | 'xlsx' | 'xls' | 'csv' | 'txt' | 'other' | string;
+  fileName?: string;
+  filePath?: string;
 }
 
 export interface KeyIdea {
@@ -132,6 +135,13 @@ export interface ChatMessage {
   id: string;
   sender: 'user' | 'tutor';
   text: string;
+  sourceType?: 'material' | 'gemini';
+  sourceLabel?: string;
+  sourceNotice?: string;
+  lessonTitle?: string;
+  mode?: 'lesson' | 'general';
+  answerLabel?: string;
+  generalReminder?: string;
   sourcePage?: number | string;
   citationExcerpt?: string;
   timestamp: string;
@@ -146,4 +156,15 @@ export interface StudentProgress {
   tasksCompleted: number;
   verifiedCitationsCount: number;
   topicsStudied: string[];
+}
+
+export interface AskTutorLog {
+  id?: string;
+  user_id: string;
+  question: string;
+  answer: string;
+  source_type: 'uploaded_material' | 'gemini';
+  material_title?: string | null;
+  page_reference?: string | number | null;
+  created_at?: string;
 }

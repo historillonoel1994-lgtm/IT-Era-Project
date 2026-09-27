@@ -11,8 +11,11 @@ import {
   User,
   ChevronDown,
   ShieldCheck,
+  Database,
+  LogIn,
 } from 'lucide-react';
 import { LessonDocument, UserProfile } from '../types';
+import { checkIsConfigured } from '../lib/supabase';
 
 export type NavTab =
   | 'summarize'
@@ -32,6 +35,7 @@ interface NavbarProps {
   onOpenUpload: () => void;
   user: UserProfile;
   onOpenAuth: () => void;
+  isLoggedIn?: boolean;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -43,6 +47,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenUpload,
   user,
   onOpenAuth,
+  isLoggedIn = false,
 }) => {
   const [showLessonDropdown, setShowLessonDropdown] = React.useState(false);
 
@@ -56,14 +61,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             <BookOpen className="w-5 h-5" />
           </div>
           <div>
-            <div className="flex items-center space-x-1.5">
-              <h1 className="font-extrabold text-lg text-slate-900 tracking-tight">
-                Study Buddy <span className="text-sky-600">AI</span>
-              </h1>
-              <span className="text-[10px] font-bold uppercase tracking-wider bg-sky-100 text-sky-800 px-1.5 py-0.5 rounded">
-                College Edition
-              </span>
-            </div>
+            <h1 className="font-extrabold text-lg text-slate-900 tracking-tight">
+              Study Buddy <span className="text-sky-600">AI</span>
+            </h1>
             <p className="text-[11px] text-slate-500 font-medium">
               Smart Support for Working Students
             </p>
@@ -142,18 +142,29 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* User Account / Profile */}
         <div className="flex items-center space-x-2">
-          <button
-            onClick={onOpenAuth}
-            className="flex items-center space-x-2 p-1.5 pl-2.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl text-xs text-slate-700 transition-colors"
-          >
-            <div className="text-right hidden sm:block">
-              <span className="font-bold text-slate-900 block leading-tight">{user.fullName}</span>
-              <span className="text-[10px] text-slate-500 block leading-tight">{user.degree.split(' ')[0]} Student</span>
-            </div>
-            <div className="w-7 h-7 rounded-lg bg-sky-600 text-white font-bold text-xs flex items-center justify-center">
-              {user.fullName[0]}
-            </div>
-          </button>
+          {isLoggedIn ? (
+            <button
+              onClick={onOpenAuth}
+              className="flex items-center space-x-2 p-1.5 pl-2.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl text-xs text-slate-700 transition-colors cursor-pointer"
+              title="View student profile & account settings"
+            >
+              <div className="text-right hidden sm:block">
+                <span className="font-bold text-slate-900 block leading-tight">{user.fullName}</span>
+                <span className="text-[10px] text-slate-500 block leading-tight">{user.degree.split(' ')[0]} Student</span>
+              </div>
+              <div className="w-7 h-7 rounded-lg bg-sky-600 text-white font-bold text-xs flex items-center justify-center shadow-xs">
+                {user.fullName[0]}
+              </div>
+            </button>
+          ) : (
+            <button
+              onClick={onOpenAuth}
+              className="px-3.5 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center space-x-1.5 cursor-pointer"
+            >
+              <LogIn className="w-3.5 h-3.5" />
+              <span>Log In / Sign Up</span>
+            </button>
+          )}
         </div>
       </div>
 

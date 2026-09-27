@@ -18,6 +18,13 @@ import {
   DEFAULT_TODAY_PLAN,
   DEFAULT_PROGRESS,
 } from '../data/mockUserData';
+import {
+  checkIsConfigured,
+  syncStudyProgressToSupabase,
+  fetchStudentMaterials,
+  fetchStudentQuizAttempts,
+  fetchStudyProgressFromSupabase,
+} from '../lib/supabase';
 
 const KEYS = {
   USER: 'studybuddy_user_profile',
@@ -63,7 +70,7 @@ export function saveUserProfile(user: UserProfile): void {
 }
 
 export function isLoggedIn(): boolean {
-  return safeGet<boolean>(KEYS.AUTH_LOGGED_IN, true);
+  return safeGet<boolean>(KEYS.AUTH_LOGGED_IN, false);
 }
 
 export function setLoggedIn(status: boolean): void {
@@ -149,6 +156,9 @@ export function saveQuizResult(result: QuizResult): void {
     quizzesCompleted: updated.length,
     averageQuizScore: avg,
   });
+
+  // Note: GenerateQuizView handles inserting directly into Supabase quiz_attempts
+  // with exact lessonId, score, total_questions, and verified student feedback.
 }
 
 // Work Schedule
@@ -198,6 +208,17 @@ export function updateProgress(partial: Partial<StudentProgress>): StudentProgre
   const current = getStudentProgress();
   const updated = { ...current, ...partial };
   safeSet(KEYS.PROGRESS, updated);
+
+  // Sync to Supabase study_progress table
+  if (checkIsConfigured()) {
+    const user = getUserProfile();
+    if (user && user.id) {
+      syncStudyProgressToSupabase(user.id, updated).catch((err) =>
+        console.warn('Background Supabase progress sync error:', err)
+      );
+    }
+  }
+
   return updated;
 }
 
@@ -214,3 +235,52 @@ export function recordCitationVerification(): void {
     verifiedCitationsCount: (current.verifiedCitationsCount || 0) + 1,
   });
 }
+
+/**
+ * Sync logged-in student's remote Supabase data (materials, quizzes, study progress) into local state
+ */
+export async function syncUserDataFromSupabase(userId: string): Promise<void> {
+  if (!checkIsConfigured() || !userId) return;
+
+  try {
+    // 1. Fetch materials from learning_materials
+    const remoteMaterialsRes = await fetchStudentMaterials(userId);
+    if (remoteMaterialsRes.data && remoteMaterialsRes.data.length > 0) {
+      const existing = getStoredLessons();
+      const nonUserSamples = existing.filter((l) => l.isSample);
+      const merged = [...remoteMaterialsRes.data, ...nonUserSamples];
+      saveStoredLessons(merged);
+      setActiveLessonId(remoteMaterialsRes.data[0].id);
+    }
+
+    // 2. Fetch quiz attempts from quiz_attempts
+    const remoteQuizzesRes = await fetchStudentQuizAttempts(userId);
+    if (remoteQuizzesRes.attempts && remoteQuizzesRes.attempts.length > 0) {
+      const mapped: QuizResult[] = remoteQuizzesRes.attempts.map((q) => {
+        const pct = q.total_questions > 0 ? Math.round((q.score / q.total_questions) * 100) : 0;
+        return {
+          id: q.id,
+          lessonId: q.learning_material_id || '',
+          lessonTitle: q.learning_materials?.title || 'Practice Quiz',
+          completedAt: q.created_at || q.completed_at || new Date().toISOString(),
+          totalQuestions: q.total_questions,
+          score: q.score,
+          percentage: pct,
+          answers: [],
+          questionsToReview: [],
+          topicsToReview: [],
+        };
+      });
+      safeSet(KEYS.QUIZ_RESULTS, mapped);
+    }
+
+    // 3. Fetch study progress from study_progress
+    const remoteProgressRes = await fetchStudyProgressFromSupabase(userId);
+    if (remoteProgressRes.progress) {
+      safeSet(KEYS.PROGRESS, remoteProgressRes.progress);
+    }
+  } catch (err) {
+    console.warn('syncUserDataFromSupabase error:', err);
+  }
+}
+

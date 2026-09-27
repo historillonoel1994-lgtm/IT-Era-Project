@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   HelpCircle,
   Sparkles,
@@ -14,10 +14,19 @@ import {
   TrendingUp,
   BookmarkCheck,
   Check,
+  Loader2,
 } from 'lucide-react';
 import { LessonDocument, QuizQuestion, QuizResult, QuizUserAnswer } from '../types';
 import { generateQuiz } from '../services/api';
 import { saveQuizResult } from '../services/storage';
+import {
+  supabase,
+  checkIsConfigured,
+  getCurrentLearningMaterialId,
+  toValidUuidOrNull,
+  updateStudyProgressInSupabase,
+  notifyDataChanged,
+} from '../lib/supabase';
 import { ResponsibleAiBanner } from './ResponsibleAiBanner';
 import { CitationModal } from './CitationModal';
 
@@ -34,6 +43,7 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
   onOpenUpload,
   onNavigateToProgress,
 }) => {
+  const isSavingQuizRef = useRef(false);
   // Quiz configuration
   const [questionCount, setQuestionCount] = useState<5 | 10 | 15>(5);
   const [quizType, setQuizType] = useState<'multiple_choice' | 'true_false' | 'mixed'>('mixed');
@@ -47,6 +57,8 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
   const [userAnswers, setUserAnswers] = useState<QuizUserAnswer[]>([]);
   const [finalResult, setFinalResult] = useState<QuizResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [quizSavedStatus, setQuizSavedStatus] = useState<'idle' | 'saving' | 'saved' | 'failed' | 'unauthenticated'>('idle');
+  const [quizSaveError, setQuizSaveError] = useState<string | null>(null);
 
   // Citation inspector modal
   const [inspectPage, setInspectPage] = useState<number | string | null>(null);
@@ -122,7 +134,10 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
     }
   };
 
-  const finishQuiz = (answers: QuizUserAnswer[]) => {
+  const finishQuiz = async (answers: QuizUserAnswer[]) => {
+    if (isSavingQuizRef.current) return;
+    isSavingQuizRef.current = true;
+
     const total = answers.length;
     const correctCount = answers.filter((a) => a.isCorrect).length;
     const percentage = Math.round((correctCount / total) * 100);
@@ -151,14 +166,112 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
     saveQuizResult(result);
     setFinalResult(result);
     setStage('completed');
+    setQuizSavedStatus('saving');
+    setQuizSaveError(null);
+
+    // 1. AUTHENTICATED USER
+    if (!checkIsConfigured()) {
+      setQuizSavedStatus('unauthenticated');
+      setQuizSaveError('Please sign in to save your activity.');
+      isSavingQuizRef.current = false;
+      return;
+    }
+
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      console.warn('Quiz DB error: User not authenticated', userError);
+      setQuizSavedStatus('unauthenticated');
+      setQuizSaveError('Please sign in to save your activity.');
+      isSavingQuizRef.current = false;
+      return;
+    }
+
+    // 4. QUIZ ATTEMPTS: Insert real row into quiz_attempts
+    // Use: user_id, learning_material_id, score, total_questions
+    let currentLearningMaterialId =
+      toValidUuidOrNull(lesson.id) || toValidUuidOrNull(getCurrentLearningMaterialId());
+
+    // If current learning material id is not a direct UUID, check if user has existing learning_materials
+    if (!currentLearningMaterialId && user?.id) {
+      try {
+        const { data: mats } = await supabase
+          .from('learning_materials')
+          .select('id')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false })
+          .limit(1);
+        if (mats && mats.length > 0) {
+          currentLearningMaterialId = mats[0].id;
+        }
+      } catch {
+        // Continue with null if not found
+      }
+    }
+
+    let { data: attempt, error: quizError } = await supabase
+      .from('quiz_attempts')
+      .insert({
+        user_id: user.id,
+        learning_material_id: currentLearningMaterialId || null,
+        score: correctCount,
+        total_questions: total,
+      })
+      .select()
+      .single();
+
+    // If foreign key constraint failed on learning_material_id, retry with null
+    if (quizError && (quizError.message?.includes('foreign key') || quizError.message?.includes('violates foreign key constraint') || quizError.code === '23503')) {
+      console.warn('Retrying quiz_attempts insert with null learning_material_id...');
+      const retry = await supabase
+        .from('quiz_attempts')
+        .insert({
+          user_id: user.id,
+          learning_material_id: null,
+          score: correctCount,
+          total_questions: total,
+        })
+        .select()
+        .single();
+      attempt = retry.data;
+      quizError = retry.error;
+    }
+
+    if (quizError) {
+      console.error('Quiz save failed:', quizError);
+      console.error('Quiz DB error:', quizError);
+      setQuizSavedStatus('failed');
+      setQuizSaveError(quizError.message || 'Quiz database save failed');
+      isSavingQuizRef.current = false;
+      // DO NOT display "Saved".
+    } else {
+      // Only show the Saved badge after Supabase confirms success.
+      setQuizSavedStatus('saved');
+      setQuizSaveError(null);
+      isSavingQuizRef.current = false;
+
+      // Increment tasks_completed in study_progress
+      updateStudyProgressInSupabase({ tasksCompletedDelta: 1 }).catch((err) =>
+        console.error('Progress DB error:', err)
+      );
+
+      // Notify other views that Supabase data has been updated
+      notifyDataChanged();
+    }
   };
 
   const handleRetake = () => {
+    isSavingQuizRef.current = false;
     setStage('setup');
     setSelectedOption(null);
     setIsAnswerSubmitted(false);
     setFinalResult(null);
     setUserAnswers([]);
+    setQuizSavedStatus('idle');
+    setQuizSaveError(null);
   };
 
   const currentQ = questions[currentIdx];
@@ -492,9 +605,35 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
             </div>
 
             <div>
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                Quiz Result Completed
-              </span>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                  Quiz Result Completed
+                </span>
+                {quizSavedStatus === 'saved' && (
+                  <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                    <span>Saved</span>
+                  </span>
+                )}
+                {quizSavedStatus === 'saving' && (
+                  <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-sky-50 text-sky-700 border border-sky-200">
+                    <Loader2 className="w-3 h-3 animate-spin text-sky-600" />
+                    <span>Saving...</span>
+                  </span>
+                )}
+                {quizSavedStatus === 'unauthenticated' && (
+                  <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">
+                    <AlertCircle className="w-3 h-3 text-amber-600" />
+                    <span>Please sign in to save your activity.</span>
+                  </span>
+                )}
+                {quizSavedStatus === 'failed' && (
+                  <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-50 text-red-700 border border-red-200">
+                    <AlertCircle className="w-3 h-3 text-red-600" />
+                    <span>Save failed: {quizSaveError}</span>
+                  </span>
+                )}
+              </div>
               <h3 className="text-3xl font-extrabold text-slate-900 mt-1">
                 {finalResult.score} / {finalResult.totalQuestions} ({finalResult.percentage}%)
               </h3>
