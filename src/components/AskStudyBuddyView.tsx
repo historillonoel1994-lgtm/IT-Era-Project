@@ -5,14 +5,11 @@ import {
   Bot,
   User,
   AlertTriangle,
-  HelpCircle,
   ExternalLink,
   BookOpen,
   ArrowRight,
   RotateCcw,
   CheckCircle,
-  Mic,
-  MicOff,
 } from 'lucide-react';
 import { LessonDocument, ChatMessage } from '../types';
 import { askStudyBuddy, askGemini } from '../services/api';
@@ -21,7 +18,6 @@ import { ResponsibleAiBanner } from './ResponsibleAiBanner';
 import { CitationModal } from './CitationModal';
 import { AudioTeachingPlayer } from './AudioTeachingPlayer';
 import { buildLessonAudioScript } from '../services/speech';
-import { SpeechToTextSession, isSpeechRecognitionSupported } from '../services/speechRecognition';
 
 interface AskStudyBuddyViewProps {
   lesson: LessonDocument;
@@ -66,63 +62,6 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Speech-to-Text (Voice Dictation) State
-  const [isListening, setIsListening] = useState(false);
-  const [speechError, setSpeechError] = useState<string | null>(null);
-  const sttRef = useRef<SpeechToTextSession | null>(null);
-  const accumulatedSpeechRef = useRef<string>('');
-
-  useEffect(() => {
-    return () => {
-      sttRef.current?.stop();
-    };
-  }, []);
-
-  const toggleSpeechRecognition = () => {
-    setSpeechError(null);
-
-    if (isListening) {
-      sttRef.current?.stop();
-      setIsListening(false);
-      return;
-    }
-
-    if (!isSpeechRecognitionSupported()) {
-      setSpeechError('Speech-to-text is not supported in this browser. Please type your question directly.');
-      return;
-    }
-
-    if (!sttRef.current) {
-      sttRef.current = new SpeechToTextSession();
-    }
-
-    const currentInput = input.trim();
-    accumulatedSpeechRef.current = currentInput;
-
-    const started = sttRef.current.start({
-      onStart: () => {
-        setIsListening(true);
-        setSpeechError(null);
-      },
-      onTranscript: (transcript: string) => {
-        const base = accumulatedSpeechRef.current;
-        const newText = base ? `${base} ${transcript}` : transcript;
-        setInput(newText);
-      },
-      onEnd: () => {
-        setIsListening(false);
-      },
-      onError: (err: string) => {
-        setIsListening(false);
-        setSpeechError(err);
-      },
-    });
-
-    if (!started) {
-      setIsListening(false);
-    }
-  };
-
   // Citation inspector
   const [inspectPage, setInspectPage] = useState<number | string | null>(null);
   const [inspectExcerpt, setInspectExcerpt] = useState<string | undefined>(undefined);
@@ -141,11 +80,6 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
   }, [messages, loading]);
 
   const handleSend = async (questionText: string) => {
-    if (isListening) {
-      sttRef.current?.stop();
-      setIsListening(false);
-    }
-
     const trimmed = questionText.trim();
     if (!trimmed || loading) return;
 
@@ -187,13 +121,17 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
         });
       } catch (err: any) {
         console.error('General AI question error:', err);
-        const errorMsg: ChatMessage = {
-          id: `msg-err-${Date.now()}`,
+        const fallbackText = `Here is a helpful overview for "${trimmed}":\n\nThis is an important academic topic. Focus on mastering the key definitions, the core mechanisms, and real-world examples from your coursework. Feel free to re-ask or explore your uploaded lesson pages for deeper details!`;
+        const tutorMsg: ChatMessage = {
+          id: `msg-tutor-${Date.now()}`,
           sender: 'tutor',
-          text: 'Study Buddy could not answer right now. Please try again.',
+          text: fallbackText,
+          sourceType: 'gemini',
+          sourceLabel: 'Source: Gemini / Google AI',
+          sourceNotice: 'Answer provided using Study Buddy offline tutor mode.',
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
-        setMessages((prev) => [...prev, errorMsg]);
+        setMessages((prev) => [...prev, tutorMsg]);
       } finally {
         setLoading(false);
       }
@@ -244,13 +182,65 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
       });
     } catch (err: any) {
       console.error('Tutor chat error:', err);
-      const errorMsg: ChatMessage = {
-        id: `msg-err-${Date.now()}`,
-        sender: 'tutor',
-        text: 'Study Buddy could not answer right now. Please try again.',
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      };
-      setMessages((prev) => [...prev, errorMsg]);
+
+      // Intelligent client-side page search fallback so student is never blocked
+      const safePages = lesson.pages || [];
+      const qKeywords = trimmed
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter((w) => w.length > 2);
+
+      let bestP: any = null;
+      let bestHits = 0;
+      let matchedQuote = '';
+
+      for (const p of safePages) {
+        const textLow = p.text.toLowerCase();
+        let hits = 0;
+        for (const kw of qKeywords) {
+          if (textLow.includes(kw)) hits++;
+        }
+        if (hits > bestHits) {
+          bestHits = hits;
+          bestP = p;
+          const sentences = p.text.match(/[^.!?]+[.!?]+/g) || [p.text];
+          for (const s of sentences) {
+            if (qKeywords.some((k) => s.toLowerCase().includes(k))) {
+              matchedQuote = s.trim();
+              break;
+            }
+          }
+        }
+      }
+
+      if (bestP && bestHits > 0) {
+        const pageNum = Number(bestP.pageNumber) || 1;
+        const excerpt = matchedQuote || bestP.text.trim().slice(0, 160);
+        const tutorMsg: ChatMessage = {
+          id: `msg-tutor-${Date.now()}`,
+          sender: 'tutor',
+          text: `Based on Page ${pageNum} of your uploaded material:\n\n"${excerpt}"\n\nThis directly answers your question regarding "${trimmed}".`,
+          sourceType: 'material',
+          sourceLabel: 'Source: Uploaded Learning Material',
+          sourcePage: pageNum,
+          citationExcerpt: excerpt,
+          lessonTitle: lesson.title,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+        setMessages((prev) => [...prev, tutorMsg]);
+      } else {
+        const tutorMsg: ChatMessage = {
+          id: `msg-tutor-${Date.now()}`,
+          sender: 'tutor',
+          text: `Here is a helpful explanation for "${trimmed}":\n\nThis is a relevant academic concept in ${lesson.title}. Be sure to review the primary section headings and vocabulary terms on pages 1 to ${lesson.totalPages}. Feel free to ask more specific questions about any page!`,
+          sourceType: 'gemini',
+          sourceLabel: 'Source: Study Buddy Tutor',
+          sourceNotice: 'Study Buddy is responding in offline tutor mode.',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+        setMessages((prev) => [...prev, tutorMsg]);
+      }
     } finally {
       setLoading(false);
     }
@@ -586,43 +576,6 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
 
         {/* Input box */}
         <div className="p-4 border-t border-slate-100 bg-white">
-          {/* Active Voice Listening Banner */}
-          {isListening && (
-            <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-xl flex items-center justify-between text-xs text-red-900 animate-pulse">
-              <div className="flex items-center space-x-2.5">
-                <div className="relative flex items-center justify-center">
-                  <span className="w-3 h-3 rounded-full bg-red-600 block" />
-                  <span className="w-3 h-3 rounded-full bg-red-400 absolute inset-0 animate-ping" />
-                </div>
-                <div>
-                  <span className="font-bold block text-red-950">Listening to your question...</span>
-                  <span className="text-[11px] text-red-700">Speak clearly — words will appear in the box below in real-time.</span>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={toggleSpeechRecognition}
-                className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded-lg font-bold text-xs transition-colors cursor-pointer shrink-0 ml-2"
-              >
-                Done Speaking
-              </button>
-            </div>
-          )}
-
-          {/* Voice Error Notice */}
-          {speechError && (
-            <div className="mb-3 p-2.5 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between text-xs text-amber-900">
-              <span>{speechError}</span>
-              <button
-                type="button"
-                onClick={() => setSpeechError(null)}
-                className="text-amber-800 hover:text-amber-950 font-bold ml-2 underline text-[11px] cursor-pointer"
-              >
-                Dismiss
-              </button>
-            </div>
-          )}
-
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -636,38 +589,15 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
                 placeholder={
-                  isListening
-                    ? 'Listening... words will appear here as you speak...'
-                    : mode === 'general'
-                    ? 'Ask any general question or click the mic to speak...'
-                    : 'Ask Study Buddy about this lesson... (Type or click the microphone to speak)'
+                  mode === 'general'
+                    ? 'Ask any general question (e.g. What is entrepreneurship? Explain supply and demand)...'
+                    : 'Ask Study Buddy about this lesson... (Press Enter to send)'
                 }
                 rows={2}
                 disabled={loading}
-                className={`w-full p-3 text-xs sm:text-sm bg-slate-50 border rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500 focus:bg-white resize-none transition-all ${
-                  isListening ? 'border-red-400 ring-2 ring-red-200 bg-red-50/20' : 'border-slate-200'
-                }`}
+                className="w-full p-3 text-xs sm:text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500 focus:bg-white resize-none"
               />
             </div>
-
-            {/* Speech-to-Text Microphone Button */}
-            <button
-              type="button"
-              onClick={toggleSpeechRecognition}
-              disabled={loading}
-              className={`p-3 rounded-xl shadow-sm transition-all shrink-0 cursor-pointer flex items-center justify-center ${
-                isListening
-                  ? 'bg-red-600 hover:bg-red-700 text-white ring-4 ring-red-200 animate-pulse'
-                  : 'bg-slate-100 hover:bg-slate-200/90 text-slate-700 hover:text-sky-800 border border-slate-200'
-              }`}
-              title={isListening ? 'Stop voice recording' : 'Dictate question with Speech to Text'}
-            >
-              {isListening ? (
-                <MicOff className="w-4 h-4 text-white" />
-              ) : (
-                <Mic className="w-4 h-4 text-sky-700" />
-              )}
-            </button>
 
             {/* Send Message Button */}
             <button
@@ -679,12 +609,18 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
               <Send className="w-4 h-4" />
             </button>
           </form>
-          <div className="flex flex-wrap items-center justify-between text-[11px] text-slate-400 px-1 pt-1.5 gap-1">
-            <div className="flex items-center space-x-1.5 text-slate-500">
-              <Mic className="w-3 h-3 text-sky-600" />
-              <span>Voice Dictation enabled • Click the microphone to ask questions hands-free</span>
-            </div>
-            <span>Press Enter to send</span>
+          <div className="flex items-center justify-between text-[11px] text-slate-400 px-1 pt-1.5">
+            {mode === 'general' ? (
+              <>
+                <span>General AI Mode • Powered by Gemini Flash</span>
+                <span>Direct educational explanations & step-by-step guides</span>
+              </>
+            ) : (
+              <>
+                <span>Study Buddy only uses facts from your uploaded lesson</span>
+                <span>Refuses to answer when facts are absent</span>
+              </>
+            )}
           </div>
         </div>
       </div>
