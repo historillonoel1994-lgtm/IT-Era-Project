@@ -188,5 +188,75 @@ AI in higher education must be viewed as an assistive cognitive scaffold—a "St
 4. Inclusive AI Access: Ensuring equitable access to AI learning tools empowers working students who cannot afford private tutoring.`
       }
     ]
+  },
+  {
+    id: 'lesson-ba-analytics',
+    title: 'Chapter 4: Financial Statements & Break-Even Analytics for Working Managers',
+    subject: 'Financial Accounting & Business Analytics',
+    totalPages: 4,
+    uploadedAt: '2026-09-25T08:30:00Z',
+    isSample: true,
+    pages: [
+      {
+        pageNumber: 1,
+        text: `FINANCIAL ACCOUNTING & BUSINESS ANALYTICS: CHAPTER 4
+Section 4.1: The Three Financial Statements & Accrual Accounting
+
+Every business manager must master the triad of financial reporting:
+1. The Income Statement: Measures operating revenues, cost of goods sold (COGS), operating expenses, and net profit over a specific accounting period.
+2. The Balance Sheet: Reflects the fundamental accounting equation: Assets = Liabilities + Shareholders' Equity at a discrete point in time.
+3. The Cash Flow Statement: Tracks liquidity across Operating, Investing, and Financing activities.
+
+Accrual vs. Cash Accounting:
+Under Generally Accepted Accounting Principles (GAAP), businesses use accrual accounting: revenues are recognized when earned (delivery of goods or services), and expenses are matched in the period incurred, regardless of when physical cash transfers. Working student managers must understand that a business can report positive net accounting profit on its income statement while simultaneously experiencing a severe cash liquidity shortage.`
+      },
+      {
+        pageNumber: 2,
+        text: `FINANCIAL ACCOUNTING & BUSINESS ANALYTICS: CHAPTER 4
+Section 4.2: Cost Structure: Fixed vs. Variable Costs and Contribution Margin
+
+Understanding cost behavior is critical for operational decision-making:
+- Fixed Costs: Expenses that do not fluctuate with output or sales volume in the short term (e.g., monthly commercial store rent, equipment leases, salaried store manager compensation, software subscriptions).
+- Variable Costs: Expenses that scale directly with unit volume produced or sold (e.g., raw food ingredients, hourly sales staff commissions, packaging materials, credit card transaction fees).
+
+The Contribution Margin Concept:
+Unit Contribution Margin (CM) = Unit Selling Price - Variable Cost per Unit.
+The Contribution Margin represents the dollar amount each incremental unit sold contributes toward covering unavoidable fixed costs and generating net operating profit.
+Contribution Margin Ratio = (Unit Selling Price - Variable Cost per Unit) / Unit Selling Price.`
+      },
+      {
+        pageNumber: 3,
+        text: `FINANCIAL ACCOUNTING & BUSINESS ANALYTICS: CHAPTER 4
+Section 4.3: Break-Even Volume and Target Operating Income Equations
+
+The Break-Even Point (BEP) represents the operational volume where total revenues exactly equal total costs (Net Operating Income = $0).
+
+Essential Formulas:
+1. Break-Even Volume (in Units) = Total Fixed Costs / (Unit Selling Price - Variable Cost per Unit).
+2. Break-Even Sales (in Dollars) = Total Fixed Costs / Contribution Margin Ratio.
+3. Target Profit Volume = (Total Fixed Costs + Target Operating Profit) / Unit Contribution Margin.
+4. Margin of Safety = Current Expected Sales - Break-Even Sales. A higher margin of safety protects the business against demand downturns.
+
+Working Example: A coffee and retail stall pays $4,000 in monthly fixed rent and equipment fees. Each beverage sells for $5.00 with $2.00 in direct ingredients and packaging (Unit CM = $3.00).
+Break-Even Volume = $4,000 / $3.00 = 1,334 beverages per month (or approximately 45 beverages per day).`
+      },
+      {
+        pageNumber: 4,
+        text: `FINANCIAL ACCOUNTING & BUSINESS ANALYTICS: CHAPTER 4
+Section 4.4: Cash Runway and Working Capital for Student Entrepreneurs
+
+Working capital represents short-term liquidity: Working Capital = Current Assets - Current Liabilities.
+Working learners balancing daytime employment and commercial ventures frequently struggle with cash timing:
+
+Cash Runway Calculation:
+Cash Runway (in Months) = Total Available Liquid Cash / Monthly Net Cash Burn Rate.
+If an enterprise possesses $15,000 in bank reserves and experiences a net operating burn of $2,500 per month, the cash runway is exactly 6 months.
+
+Working Manager Takeaways:
+- Never conflate accounting revenue with actual collected cash.
+- Lower fixed overhead reduces the break-even threshold and extends cash runway.
+- Continuously monitor the Margin of Safety to buffer against macroeconomic and seasonal sales shocks.`
+      }
+    ]
   }
 ];

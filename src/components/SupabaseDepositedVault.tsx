@@ -19,8 +19,12 @@ import {
   AlertCircle,
   Loader2,
   Check,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { UserProfile, LessonDocument, QuizResult, StudentProgress } from '../types';
+import { DEFAULT_LESSONS } from '../data/defaultLessons';
+import { SAMPLE_EXAM_TAKES } from '../data/precomputedData';
 import {
   supabase,
   STORAGE_BUCKET,
@@ -88,6 +92,10 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
   // Friendly error notice
   const [dbErrorMessage, setDbErrorMessage] = useState<string | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
+  const [showAllSamplesExpanded, setShowAllSamplesExpanded] = useState<boolean>(false);
+  const [showAllQuizSamplesExpanded, setShowAllQuizSamplesExpanded] = useState<boolean>(false);
+  const [showAllMaterialsList, setShowAllMaterialsList] = useState<boolean>(false);
+  const [showAllQuizzesList, setShowAllQuizzesList] = useState<boolean>(false);
 
   const isSupabaseReady = checkIsConfigured();
   const supabaseConfig = getActiveSupabaseConfig();
@@ -597,7 +605,7 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
       {/* 1. SAVED LEARNING MATERIALS (loaded from learning_materials) */}
       {(activeTab === 'all' || activeTab === 'materials') && (
         <div className="space-y-3">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div className="flex items-center space-x-2">
               <div className="p-1.5 bg-sky-100 text-sky-800 rounded-lg">
                 <FileText className="w-4 h-4" />
@@ -606,74 +614,193 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
                 Saved Learning Materials
               </h3>
               <span className="text-[11px] text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full font-medium">
-                {dbMaterials.length} Documents in Supabase
+                {dbMaterials.length > 0
+                  ? (showAllMaterialsList || dbMaterials.length <= 4
+                      ? `${dbMaterials.length} Documents in Supabase`
+                      : `Showing 4 of ${dbMaterials.length} Documents`)
+                  : '4 Course Samples'}
               </span>
             </div>
 
-            <button
-              onClick={onOpenUpload}
-              className="text-xs text-sky-700 hover:text-sky-900 font-semibold cursor-pointer"
-            >
-              + Upload Material
-            </button>
+            <div className="flex items-center space-x-2 shrink-0">
+              {dbMaterials.length > 4 && (
+                <button
+                  type="button"
+                  onClick={() => setShowAllMaterialsList((prev) => !prev)}
+                  className="px-3 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-300 rounded-lg text-xs font-bold flex items-center space-x-1.5 transition-colors cursor-pointer shadow-2xs"
+                >
+                  {showAllMaterialsList ? (
+                    <>
+                      <ChevronUp className="w-3.5 h-3.5" />
+                      <span>Limit to 4 Results</span>
+                    </>
+                  ) : (
+                    <>
+                      <ChevronDown className="w-3.5 h-3.5" />
+                      <span>Open to View Full List ({dbMaterials.length})</span>
+                    </>
+                  )}
+                </button>
+              )}
+
+              <button
+                onClick={onOpenUpload}
+                className="text-xs text-sky-700 hover:text-sky-900 font-semibold cursor-pointer"
+              >
+                + Upload Material
+              </button>
+            </div>
           </div>
 
           {dbMaterials.length === 0 ? (
-            <div className="p-8 text-center border-2 border-dashed border-slate-200 rounded-2xl bg-slate-50/50 space-y-2">
-              <Upload className="w-8 h-8 text-slate-400 mx-auto" />
-              <p className="text-sm font-bold text-slate-700">
-                No learning materials saved yet.
-              </p>
-              <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                Upload a course PDF, Word document, or lecture deck. The file will be stored in bucket <code className="text-sky-800 font-mono font-semibold">{STORAGE_BUCKET}</code> and registered into your <code className="text-sky-800 font-mono font-semibold">learning_materials</code> table.
-              </p>
-              <button
-                onClick={onOpenUpload}
-                className="mt-2 px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
-              >
-                Upload Your First Material
-              </button>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {dbMaterials.map((mat) => {
-                const ext = (mat.file_name?.split('.').pop() || 'pdf').toLowerCase();
-                return (
+            <div className="space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-sky-50 border border-sky-200/80 rounded-xl p-3">
+                <div>
+                  <span className="text-xs font-bold text-sky-900 block">
+                    4 Course Samples Available to Choose
+                  </span>
+                  <p className="text-[11px] text-sky-700">
+                    No custom uploads yet. Select any pre-loaded course lesson below to start studying or upload your own document:
+                  </p>
+                </div>
+                <div className="flex items-center space-x-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setShowAllSamplesExpanded((prev) => !prev)}
+                    className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg text-xs font-bold flex items-center space-x-1.5 transition-colors shadow-xs cursor-pointer"
+                  >
+                    {showAllSamplesExpanded ? (
+                      <>
+                        <EyeOff className="w-3.5 h-3.5" />
+                        <span>Collapse All</span>
+                      </>
+                    ) : (
+                      <>
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>Open All Samples</span>
+                      </>
+                    )}
+                  </button>
+                  <button
+                    onClick={onOpenUpload}
+                    className="px-3 py-1.5 bg-white border border-sky-300 text-sky-800 rounded-lg text-xs font-bold hover:bg-sky-50 transition-colors cursor-pointer"
+                  >
+                    + Upload File
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {DEFAULT_LESSONS.slice(0, 4).map((sample, idx) => (
                   <div
-                    key={mat.id}
-                    onClick={() => handleMaterialClick(mat)}
+                    key={sample.id}
+                    onClick={() => onSelectLesson(sample)}
                     className="p-4 bg-slate-50 hover:bg-sky-50/70 border border-slate-200 hover:border-sky-300 rounded-2xl transition-all cursor-pointer space-y-2"
                   >
                     <div className="flex items-start justify-between">
                       <div>
                         <div className="flex items-center space-x-1.5 mb-1">
-                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-slate-200/80 text-slate-700">
-                            {ext.toUpperCase()}
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-sky-100 text-sky-800">
+                            Sample {idx + 1}
                           </span>
                           <h4 className="font-bold text-slate-900 text-xs sm:text-sm line-clamp-1">
-                            {mat.title || mat.file_name}
+                            {sample.title}
                           </h4>
                         </div>
                         <p className="text-xs text-slate-500 truncate max-w-xs">
-                          {mat.file_name || mat.file_path || 'Uploaded Document'}
+                          {sample.subject}
                         </p>
                       </div>
                       <span className="px-2 py-0.5 bg-sky-100 text-sky-800 rounded-md text-[10px] font-bold shrink-0">
-                        {mat.total_pages ? `${mat.total_pages} Pages` : '1 Document'}
+                        {sample.totalPages} Pages
                       </span>
                     </div>
 
+                    {showAllSamplesExpanded && (
+                      <div className="pt-2 border-t border-slate-200 text-[11px] text-slate-600 space-y-1">
+                        <span className="font-semibold text-slate-700 block">Excerpts:</span>
+                        <p className="line-clamp-2 italic bg-white p-1.5 rounded border border-slate-100">
+                          {sample.pages[0]?.text.slice(0, 140)}...
+                        </p>
+                      </div>
+                    )}
+
                     <div className="pt-2 border-t border-slate-200/60 flex items-center justify-between text-[11px] text-slate-500">
-                      <span className="text-[11px] text-slate-600">
-                        {mat.created_at ? new Date(mat.created_at).toLocaleDateString() : 'Saved in cloud'}
+                      <span className="text-[11px] text-emerald-700 font-semibold">
+                        Ready to load
                       </span>
                       <span className="text-sky-700 font-semibold hover:underline">
-                        Load Lesson →
+                        Open Lesson →
                       </span>
                     </div>
                   </div>
-                );
-              })}
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {(showAllMaterialsList ? dbMaterials : dbMaterials.slice(0, 4)).map((mat) => {
+                  const ext = (mat.file_name?.split('.').pop() || 'pdf').toLowerCase();
+                  return (
+                    <div
+                      key={mat.id}
+                      onClick={() => handleMaterialClick(mat)}
+                      className="p-4 bg-slate-50 hover:bg-sky-50/70 border border-slate-200 hover:border-sky-300 rounded-2xl transition-all cursor-pointer space-y-2"
+                    >
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <div className="flex items-center space-x-1.5 mb-1">
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-slate-200/80 text-slate-700">
+                              {ext.toUpperCase()}
+                            </span>
+                            <h4 className="font-bold text-slate-900 text-xs sm:text-sm line-clamp-1">
+                              {mat.title || mat.file_name}
+                            </h4>
+                          </div>
+                          <p className="text-xs text-slate-500 truncate max-w-xs">
+                            {mat.file_name || mat.file_path || 'Uploaded Document'}
+                          </p>
+                        </div>
+                        <span className="px-2 py-0.5 bg-sky-100 text-sky-800 rounded-md text-[10px] font-bold shrink-0">
+                          {mat.total_pages ? `${mat.total_pages} Pages` : '1 Document'}
+                        </span>
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-200/60 flex items-center justify-between text-[11px] text-slate-500">
+                        <span className="text-[11px] text-slate-600">
+                          {mat.created_at ? new Date(mat.created_at).toLocaleDateString() : 'Saved in cloud'}
+                        </span>
+                        <span className="text-sky-700 font-semibold hover:underline">
+                          Load Lesson →
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {dbMaterials.length > 4 && (
+                <div className="flex justify-center pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowAllMaterialsList((prev) => !prev)}
+                    className="px-4 py-2 bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-300 rounded-xl text-xs font-bold flex items-center space-x-2 transition-colors cursor-pointer shadow-2xs"
+                  >
+                    {showAllMaterialsList ? (
+                      <>
+                        <ChevronUp className="w-3.5 h-3.5" />
+                        <span>Limit to 4 Results</span>
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="w-3.5 h-3.5" />
+                        <span>Open to View Full List ({dbMaterials.length} Uploaded Files)</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -682,7 +809,7 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
       {/* 2. COMPLETED QUIZ ATTEMPTS (loaded from quiz_attempts) */}
       {(activeTab === 'all' || activeTab === 'quizzes') && (
         <div className="space-y-3 pt-3">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div className="flex items-center space-x-2">
               <div className="p-1.5 bg-indigo-100 text-indigo-800 rounded-lg">
                 <Award className="w-4 h-4" />
@@ -691,95 +818,240 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
                 Completed Quiz Attempts
               </h3>
               <span className="text-[11px] text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full font-medium">
-                {dbQuizzes.length} Attempts in Supabase
+                {dbQuizzes.length > 0
+                  ? (showAllQuizzesList || dbQuizzes.length <= 4
+                      ? `${dbQuizzes.length} Attempts in Supabase`
+                      : `Showing 4 of ${dbQuizzes.length} Attempts`)
+                  : '4 Sample Exam Takes'}
               </span>
             </div>
 
-            <button
-              onClick={onTakeQuiz}
-              className="text-xs text-indigo-700 hover:text-indigo-900 font-semibold cursor-pointer"
-            >
-              + Generate Practice Quiz
-            </button>
+            <div className="flex items-center space-x-2 shrink-0">
+              {dbQuizzes.length > 4 && (
+                <button
+                  type="button"
+                  onClick={() => setShowAllQuizzesList((prev) => !prev)}
+                  className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-300 rounded-lg text-xs font-bold flex items-center space-x-1.5 transition-colors cursor-pointer shadow-2xs"
+                >
+                  {showAllQuizzesList ? (
+                    <>
+                      <ChevronUp className="w-3.5 h-3.5" />
+                      <span>Limit to 4 Results</span>
+                    </>
+                  ) : (
+                    <>
+                      <ChevronDown className="w-3.5 h-3.5" />
+                      <span>Open to View Full List ({dbQuizzes.length})</span>
+                    </>
+                  )}
+                </button>
+              )}
+
+              <button
+                onClick={onTakeQuiz}
+                className="text-xs text-indigo-700 hover:text-indigo-900 font-semibold cursor-pointer"
+              >
+                + Generate Practice Quiz
+              </button>
+            </div>
           </div>
 
           {dbQuizzes.length === 0 ? (
-            <div className="p-8 text-center border-2 border-dashed border-slate-200 rounded-2xl bg-slate-50/50 space-y-2">
-              <Award className="w-8 h-8 text-slate-400 mx-auto" />
-              <p className="text-sm font-bold text-slate-700">
-                No quiz attempts completed yet.
-              </p>
-              <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                Generate an AI practice quiz from any lesson. When you finish, your score, question count, and mastery percentage are saved into <code className="text-indigo-800 font-mono font-semibold">quiz_attempts</code>.
-              </p>
-              <button
-                onClick={onTakeQuiz}
-                className="mt-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
-              >
-                Take a Practice Quiz Now
-              </button>
+            <div className="space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-indigo-50 border border-indigo-200/80 rounded-xl p-3">
+                <div>
+                  <span className="text-xs font-bold text-indigo-900 block">
+                    4 Sample Exam Takes Available
+                  </span>
+                  <p className="text-[11px] text-indigo-700">
+                    No custom quiz attempts recorded yet. Inspect the 4 pre-completed student exam takes below with real scores and citations:
+                  </p>
+                </div>
+                <div className="flex items-center space-x-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setShowAllQuizSamplesExpanded((prev) => !prev)}
+                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold flex items-center space-x-1.5 transition-colors shadow-xs cursor-pointer"
+                  >
+                    {showAllQuizSamplesExpanded ? (
+                      <>
+                        <EyeOff className="w-3.5 h-3.5" />
+                        <span>Collapse All</span>
+                      </>
+                    ) : (
+                      <>
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>Open All Exam Takes</span>
+                      </>
+                    )}
+                  </button>
+                  <button
+                    onClick={onTakeQuiz}
+                    className="px-3 py-1.5 bg-white border border-indigo-300 text-indigo-800 rounded-lg text-xs font-bold hover:bg-indigo-50 transition-colors cursor-pointer"
+                  >
+                    + Take New Quiz
+                  </button>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                <table className="w-full text-left text-xs text-slate-700">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-[11px] text-slate-500 font-bold uppercase tracking-wider">
+                    <tr>
+                      <th className="px-4 py-3">Sample Take</th>
+                      <th className="px-4 py-3">Score</th>
+                      <th className="px-4 py-3">Percentage</th>
+                      <th className="px-4 py-3">Completed Date</th>
+                      <th className="px-4 py-3 text-right">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {SAMPLE_EXAM_TAKES.slice(0, 4).map((take, idx) => (
+                      <React.Fragment key={take.id}>
+                        <tr className="hover:bg-slate-50/70 transition-colors">
+                          <td className="px-4 py-3 font-semibold text-slate-900">
+                            <span className="text-[10px] font-bold uppercase bg-indigo-50 text-indigo-700 px-1.5 py-0.5 rounded mr-2">
+                              Take {idx + 1}
+                            </span>
+                            <span>{take.lessonTitle}</span>
+                          </td>
+                          <td className="px-4 py-3 font-mono font-bold text-slate-800">
+                            {take.score} / {take.totalQuestions}
+                          </td>
+                          <td className="px-4 py-3">
+                            <span
+                              className={`px-2 py-0.5 rounded-full font-bold text-[11px] ${
+                                take.percentage >= 90
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-indigo-100 text-indigo-800'
+                              }`}
+                            >
+                              {take.percentage}%
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-slate-500">
+                            {new Date(take.completedAt).toLocaleDateString()}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <span className="inline-flex items-center space-x-1 text-emerald-700 text-[11px] font-semibold bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-100">
+                              <CheckCircle2 className="w-3 h-3" />
+                              <span>Sample</span>
+                            </span>
+                          </td>
+                        </tr>
+                        {showAllQuizSamplesExpanded && (
+                          <tr className="bg-slate-50/70">
+                            <td colSpan={5} className="px-4 py-3 text-[11px] space-y-1.5">
+                              <span className="font-bold text-slate-700 block">
+                                Question Breakdown ({take.totalQuestions} Questions):
+                              </span>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                {take.answers.slice(0, 4).map((ans, qIdx) => (
+                                  <div key={qIdx} className="bg-white p-2 rounded border border-slate-200 text-[10px] space-y-0.5">
+                                    <div className="flex items-center justify-between font-semibold">
+                                      <span className="truncate max-w-[200px]">Q{qIdx + 1}: {ans.question}</span>
+                                      <span className={ans.isCorrect ? 'text-emerald-700 font-bold' : 'text-red-700 font-bold'}>
+                                        {ans.isCorrect ? '✓' : '✗'}
+                                      </span>
+                                    </div>
+                                    <p className="text-slate-500 truncate">Ans: {ans.userAnswer}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           ) : (
-            <div className="overflow-x-auto rounded-2xl border border-slate-200">
-              <table className="w-full text-left text-xs text-slate-700">
-                <thead className="bg-slate-50 border-b border-slate-200 text-[11px] text-slate-500 font-bold uppercase tracking-wider">
-                  <tr>
-                    <th className="px-4 py-3">Material ID / Record</th>
-                    <th className="px-4 py-3">Score</th>
-                    <th className="px-4 py-3">Percentage</th>
-                    <th className="px-4 py-3">Completed Date</th>
-                    <th className="px-4 py-3 text-right">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 bg-white">
-                  {dbQuizzes.map((q) => {
-                    const percentage =
-                      q.total_questions > 0 ? Math.round((q.score / q.total_questions) * 100) : 0;
-                    return (
-                      <tr key={q.id} className="hover:bg-slate-50/70 transition-colors">
-                        <td className="px-4 py-3 font-semibold text-slate-900">
-                          {q.learning_material_id ? (
-                            <span className="font-mono text-[11px] text-slate-700">
-                              {q.learning_material_id.slice(0, 13)}...
+            <div className="space-y-3">
+              <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                <table className="w-full text-left text-xs text-slate-700">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-[11px] text-slate-500 font-bold uppercase tracking-wider">
+                    <tr>
+                      <th className="px-4 py-3">Material ID / Record</th>
+                      <th className="px-4 py-3">Score</th>
+                      <th className="px-4 py-3">Percentage</th>
+                      <th className="px-4 py-3">Completed Date</th>
+                      <th className="px-4 py-3 text-right">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {(showAllQuizzesList ? dbQuizzes : dbQuizzes.slice(0, 4)).map((q) => {
+                      const percentage =
+                        q.total_questions > 0 ? Math.round((q.score / q.total_questions) * 100) : 0;
+                      return (
+                        <tr key={q.id} className="hover:bg-slate-50/70 transition-colors">
+                          <td className="px-4 py-3 font-semibold text-slate-900">
+                            {q.learning_material_id ? (
+                              <span className="font-mono text-[11px] text-slate-700">
+                                {q.learning_material_id.slice(0, 13)}...
+                              </span>
+                            ) : (
+                              <span className="text-slate-600">Practice Quiz</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 font-mono font-bold text-slate-800">
+                            {q.score} / {q.total_questions}
+                          </td>
+                          <td className="px-4 py-3">
+                            <span
+                              className={`px-2 py-0.5 rounded-full font-bold text-[11px] ${
+                                percentage >= 80
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : percentage >= 60
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-red-100 text-red-800'
+                              }`}
+                            >
+                              {percentage}%
                             </span>
-                          ) : (
-                            <span className="text-slate-600">Practice Quiz</span>
-                          )}
-                        </td>
-                        <td className="px-4 py-3 font-mono font-bold text-slate-800">
-                          {q.score} / {q.total_questions}
-                        </td>
-                        <td className="px-4 py-3">
-                          <span
-                            className={`px-2 py-0.5 rounded-full font-bold text-[11px] ${
-                              percentage >= 80
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : percentage >= 60
-                                ? 'bg-amber-100 text-amber-800'
-                                : 'bg-red-100 text-red-800'
-                            }`}
-                          >
-                            {percentage}%
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-slate-500">
-                          {q.created_at
-                            ? new Date(q.created_at).toLocaleDateString() +
-                              ' ' +
-                              new Date(q.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                            : 'Saved in database'}
-                        </td>
-                        <td className="px-4 py-3 text-right">
-                          <span className="inline-flex items-center space-x-1 text-emerald-700 text-[11px] font-semibold bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-100">
-                            <CheckCircle2 className="w-3 h-3" />
-                            <span>Saved</span>
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                          </td>
+                          <td className="px-4 py-3 text-slate-500">
+                            {q.created_at
+                              ? new Date(q.created_at).toLocaleDateString() +
+                                ' ' +
+                                new Date(q.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                              : 'Saved in database'}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <span className="inline-flex items-center space-x-1 text-emerald-700 text-[11px] font-semibold bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-100">
+                              <CheckCircle2 className="w-3 h-3" />
+                              <span>Saved</span>
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {dbQuizzes.length > 4 && (
+                <div className="flex justify-center pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowAllQuizzesList((prev) => !prev)}
+                    className="px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-300 rounded-xl text-xs font-bold flex items-center space-x-2 transition-colors cursor-pointer shadow-2xs"
+                  >
+                    {showAllQuizzesList ? (
+                      <>
+                        <ChevronUp className="w-3.5 h-3.5" />
+                        <span>Limit to 4 Results</span>
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="w-3.5 h-3.5" />
+                        <span>Open to View Full List ({dbQuizzes.length} Exam Attempts)</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

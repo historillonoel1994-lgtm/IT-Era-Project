@@ -8,8 +8,12 @@ import {
   SchoolTaskItem,
   TodayPlanItem,
   StudentProgress,
+  AudioSessionProgress,
+  ReviewerAttempt,
+  MemorizationLevelProgress,
 } from '../types';
 import { DEFAULT_LESSONS } from '../data/defaultLessons';
+import { SAMPLE_EXAM_TAKES } from '../data/precomputedData';
 import {
   DEFAULT_USER,
   DEFAULT_WORK_SCHEDULE,
@@ -38,6 +42,10 @@ const KEYS = {
   TODAY_PLAN: 'studybuddy_today_plan',
   PROGRESS: 'studybuddy_progress',
   AUTH_LOGGED_IN: 'studybuddy_logged_in',
+  AUDIO_SESSIONS: 'studybuddy_audio_sessions',
+  REVIEWER_ATTEMPTS: 'studybuddy_reviewer_attempts',
+  FLASHCARD_PROGRESS: 'studybuddy_flashcard_progress',
+  MEMORIZATION_PROGRESS: 'studybuddy_memorization_progress',
 };
 
 // Safe JSON parser
@@ -84,7 +92,19 @@ export function getStoredLessons(): LessonDocument[] {
     safeSet(KEYS.LESSONS, DEFAULT_LESSONS);
     return DEFAULT_LESSONS;
   }
-  return lessons;
+  // Ensure all DEFAULT_LESSONS exist in the list so new samples are always accessible
+  let merged = [...lessons];
+  let changed = false;
+  for (const def of DEFAULT_LESSONS) {
+    if (!merged.some((l) => l.id === def.id)) {
+      merged.push(def);
+      changed = true;
+    }
+  }
+  if (changed) {
+    safeSet(KEYS.LESSONS, merged);
+  }
+  return merged;
 }
 
 export function saveStoredLessons(lessons: LessonDocument[]): void {
@@ -140,7 +160,12 @@ export function saveStoredSummary(lessonId: string, summary: LessonSummary): voi
 
 // Quiz Results
 export function getQuizResults(): QuizResult[] {
-  return safeGet<QuizResult[]>(KEYS.QUIZ_RESULTS, []);
+  const stored = safeGet<QuizResult[]>(KEYS.QUIZ_RESULTS, []);
+  if (stored.length === 0) {
+    safeSet(KEYS.QUIZ_RESULTS, SAMPLE_EXAM_TAKES);
+    return SAMPLE_EXAM_TAKES;
+  }
+  return stored;
 }
 
 export function saveQuizResult(result: QuizResult): void {
@@ -283,4 +308,92 @@ export async function syncUserDataFromSupabase(userId: string): Promise<void> {
     console.warn('syncUserDataFromSupabase error:', err);
   }
 }
+
+// ==========================================
+// AUDIO SESSIONS PERSISTENCE
+// ==========================================
+
+export function getAudioSessionProgress(documentId: string): AudioSessionProgress | null {
+  const sessions = safeGet<Record<string, AudioSessionProgress>>(KEYS.AUDIO_SESSIONS, {});
+  return sessions[documentId] || null;
+}
+
+export function saveAudioSessionProgress(progress: AudioSessionProgress): void {
+  const sessions = safeGet<Record<string, AudioSessionProgress>>(KEYS.AUDIO_SESSIONS, {});
+  sessions[progress.documentId] = {
+    ...progress,
+    lastAccessedAt: new Date().toISOString(),
+  };
+  safeSet(KEYS.AUDIO_SESSIONS, sessions);
+}
+
+// ==========================================
+// SELF-REVIEWER ATTEMPTS PERSISTENCE
+// ==========================================
+
+export function getReviewerAttempts(): ReviewerAttempt[] {
+  return safeGet<ReviewerAttempt[]>(KEYS.REVIEWER_ATTEMPTS, []);
+}
+
+export function saveReviewerAttempt(attempt: ReviewerAttempt): void {
+  const current = getReviewerAttempts();
+  const updated = [attempt, ...current.filter((a) => a.id !== attempt.id)];
+  safeSet(KEYS.REVIEWER_ATTEMPTS, updated);
+
+  // Also maintain existing quiz score and tasks completed stats
+  const progress = getStudentProgress();
+  const totalScore = updated.reduce((acc, a) => acc + a.percentage, 0);
+  const avg = Math.round(totalScore / updated.length);
+
+  updateProgress({
+    quizzesCompleted: progress.quizzesCompleted + 1,
+    averageQuizScore: avg,
+    tasksCompleted: progress.tasksCompleted + 1,
+    verifiedCitationsCount: (progress.verifiedCitationsCount || 0) + (attempt.answers ? attempt.answers.length : 5),
+  });
+}
+
+// ==========================================
+// FLASHCARDS & MEMORIZATION PERSISTENCE
+// ==========================================
+
+export function getFlashcardProgress(documentId: string): Record<string, 'mastered' | 'learning' | 'review_again'> {
+  const all = safeGet<Record<string, Record<string, 'mastered' | 'learning' | 'review_again'>>>(KEYS.FLASHCARD_PROGRESS, {});
+  return all[documentId] || {};
+}
+
+export function saveFlashcardProgress(
+  documentId: string,
+  progress: Record<string, 'mastered' | 'learning' | 'review_again'>
+): void {
+  const all = safeGet<Record<string, Record<string, 'mastered' | 'learning' | 'review_again'>>>(KEYS.FLASHCARD_PROGRESS, {});
+  all[documentId] = progress;
+  safeSet(KEYS.FLASHCARD_PROGRESS, all);
+}
+
+export function getMemorizationProgress(documentId: string): MemorizationLevelProgress {
+  const all = safeGet<Record<string, MemorizationLevelProgress>>(KEYS.MEMORIZATION_PROGRESS, {});
+  if (all[documentId]) return all[documentId];
+
+  // Default initial baseline
+  return {
+    level1_terms: 45,
+    level2_definitions: 30,
+    level3_own_words: 20,
+    level4_application: 10,
+    level5_mastery: 5,
+    recommendations: [
+      'Complete Chapter 1 interactive flashcards to boost Level 1 term recognition.',
+      'Practice with Medium difficulty questions to strengthen definition recall (Level 2).',
+      'Attempt Scenario & Short Answer questions to test practical application (Level 4 & 5).',
+    ],
+  };
+}
+
+export function saveMemorizationProgress(documentId: string, progress: MemorizationLevelProgress): void {
+  const all = safeGet<Record<string, MemorizationLevelProgress>>(KEYS.MEMORIZATION_PROGRESS, {});
+  all[documentId] = progress;
+  safeSet(KEYS.MEMORIZATION_PROGRESS, all);
+}
+
 

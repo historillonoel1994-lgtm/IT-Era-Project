@@ -206,3 +206,140 @@ export async function parseDocumentFile(
 export async function parsePdfFile(base64: string, filename: string): Promise<ParsedDocumentResult> {
   return parseDocumentFile(base64, filename, 'pdf');
 }
+
+// ==========================================
+// SELF-REVIEWER & EXPLANATION API CLIENTS
+// ==========================================
+
+import {
+  DocumentChapter,
+  ReviewerQuestion,
+  ReviewerDifficulty,
+  FlashcardItem,
+  ConceptContrastItem,
+} from '../types';
+
+export interface ExplainTermResult {
+  success: boolean;
+  term: string;
+  definition: string;
+  isSupplementary: boolean;
+  source: 'document' | 'gemini' | 'fallback';
+  spokenText: string;
+  citation: string;
+}
+
+export async function explainUnfamiliarTerm(params: {
+  term: string;
+  pageText?: string;
+  allPagesText?: string;
+  lessonTitle?: string;
+}): Promise<ExplainTermResult> {
+  const response = await fetch('/api/explain-term', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to retrieve term explanation');
+  }
+
+  return response.json();
+}
+
+export async function analyzeDocumentChapters(params: {
+  pages: { pageNumber: number | string; text: string }[];
+  lessonTitle: string;
+}): Promise<DocumentChapter[]> {
+  const response = await fetch('/api/analyze-chapters', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to analyze chapters');
+  }
+
+  const data = await response.json();
+  return data.chapters || [];
+}
+
+export interface ReviewerGenerateParams {
+  pages: { pageNumber: number | string; text: string }[];
+  lessonTitle: string;
+  chapterId?: string;
+  startPage?: number;
+  endPage?: number;
+  questionCount: number;
+  difficulty: ReviewerDifficulty;
+  questionTypes: string;
+}
+
+export interface ReviewerGenerateResult {
+  success: boolean;
+  insufficient?: boolean;
+  availableQuestions?: number;
+  message?: string;
+  questions: ReviewerQuestion[];
+  isHighTrafficFallback?: boolean;
+  notice?: string;
+}
+
+export async function generateSelfReviewer(params: ReviewerGenerateParams): Promise<ReviewerGenerateResult> {
+  const response = await fetch('/api/reviewer-generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to generate self-reviewer questions');
+  }
+
+  return response.json();
+}
+
+export async function generateFlashcards(params: {
+  pages: { pageNumber: number | string; text: string }[];
+  lessonTitle: string;
+  chapterId?: string;
+}): Promise<FlashcardItem[]> {
+  const response = await fetch('/api/generate-flashcards', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to generate flashcards');
+  }
+
+  const data = await response.json();
+  return data.flashcards || [];
+}
+
+export async function generateConceptContrasts(params: {
+  pages: { pageNumber: number | string; text: string }[];
+  lessonTitle: string;
+}): Promise<ConceptContrastItem[]> {
+  const response = await fetch('/api/generate-contrasts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to generate concept contrasts');
+  }
+
+  const data = await response.json();
+  return data.contrasts || [];
+}
+

@@ -14,6 +14,10 @@ import {
   FileType,
   File,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { LessonDocument } from '../types';
 import { DEFAULT_LESSONS } from '../data/defaultLessons';
@@ -55,6 +59,7 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
   } | null>(null);
   const [uploadStatus, setUploadStatus] = useState<string>('');
   const [isSavedConfirmed, setIsSavedConfirmed] = useState<boolean>(false);
+  const [showAllSamplesExpanded, setShowAllSamplesExpanded] = useState<boolean>(false);
 
   if (!isOpen) return null;
 
@@ -428,34 +433,105 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
               </div>
             </div>
           ) : (
-            <div className="space-y-3">
-              <p className="text-xs text-slate-600 mb-2">
-                Choose one of these authentic course lessons equipped with real page citations to explore all three AI features immediately:
-              </p>
+            <div className="space-y-3.5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-sky-50 border border-sky-200/80 rounded-xl p-3">
+                <div>
+                  <span className="text-xs font-bold text-sky-900 block">
+                    4 Authentic Course Samples Available
+                  </span>
+                  <p className="text-[11px] text-sky-700">
+                    Choose any of these pre-loaded lessons to immediately test Summarization, Full Audio Narration, Quizzes, and Study Buddy.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAllSamplesExpanded((prev) => !prev)}
+                  className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg text-xs font-bold flex items-center space-x-1.5 transition-colors shrink-0 shadow-xs cursor-pointer self-start sm:self-center"
+                >
+                  {showAllSamplesExpanded ? (
+                    <>
+                      <EyeOff className="w-3.5 h-3.5" />
+                      <span>Collapse All</span>
+                    </>
+                  ) : (
+                    <>
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Open All Samples (Full Preview)</span>
+                    </>
+                  )}
+                </button>
+              </div>
 
-              {DEFAULT_LESSONS.map((sample) => (
+              {DEFAULT_LESSONS.slice(0, 4).map((sample, idx) => (
                 <div
                   key={sample.id}
-                  onClick={() => handleSelectSample(sample)}
-                  className="p-3.5 border border-slate-200 hover:border-sky-400 bg-white hover:bg-sky-50/50 rounded-xl cursor-pointer transition-all flex items-start justify-between group shadow-sm"
+                  className="border border-slate-200 hover:border-sky-400 bg-white rounded-xl transition-all shadow-sm overflow-hidden"
                 >
-                  <div className="space-y-1">
-                    <div className="flex items-center space-x-2">
-                      <span className="text-xs font-bold text-slate-800 group-hover:text-sky-800">
-                        {sample.title}
-                      </span>
+                  <div
+                    onClick={() => handleSelectSample(sample)}
+                    className="p-3.5 hover:bg-sky-50/50 cursor-pointer flex items-start justify-between group"
+                  >
+                    <div className="space-y-1">
+                      <div className="flex items-center space-x-2">
+                        <span className="text-[10px] font-bold uppercase tracking-wider bg-slate-100 text-slate-700 px-2 py-0.5 rounded">
+                          Sample {idx + 1}
+                        </span>
+                        <span className="text-xs font-bold text-slate-800 group-hover:text-sky-800">
+                          {sample.title}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-500">{sample.subject}</p>
+                      <div className="flex items-center space-x-3 text-[11px] text-slate-400 pt-1">
+                        <span>{sample.totalPages} Pages</span>
+                        <span>•</span>
+                        <span className="text-emerald-700 font-medium">Full page text & citations included</span>
+                      </div>
                     </div>
-                    <p className="text-xs text-slate-500">{sample.subject}</p>
-                    <div className="flex items-center space-x-3 text-[11px] text-slate-400 pt-1">
-                      <span>{sample.totalPages} Pages</span>
-                      <span>•</span>
-                      <span className="text-emerald-700 font-medium">Page citations included</span>
+
+                    <div className="flex items-center space-x-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleSelectSample(sample);
+                        }}
+                        className="px-3.5 py-1.5 text-xs font-bold bg-sky-600 hover:bg-sky-700 text-white rounded-lg transition-colors shadow-xs"
+                      >
+                        Use Lesson
+                      </button>
                     </div>
                   </div>
 
-                  <button className="px-3 py-1.5 text-xs font-semibold bg-sky-50 group-hover:bg-sky-600 text-sky-700 group-hover:text-white rounded-lg transition-colors shrink-0">
-                    Use Lesson
-                  </button>
+                  {/* Expanded detail section shown when Open All is active */}
+                  {showAllSamplesExpanded && (
+                    <div className="px-4 py-3 bg-slate-50 border-t border-slate-200/80 text-xs space-y-2.5">
+                      <div className="flex items-center justify-between text-[11px] font-semibold text-slate-600 border-b border-slate-200 pb-1.5">
+                        <span>Document Overview ({sample.totalPages} Pages Extracted):</span>
+                        <span className="text-sky-700 font-mono">ID: {sample.id}</span>
+                      </div>
+                      <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                        {sample.pages.map((p) => (
+                          <div key={p.pageNumber} className="bg-white border border-slate-200 rounded-lg p-2 space-y-1">
+                            <span className="text-[10px] font-bold text-sky-800 uppercase block">
+                              Page {p.pageNumber}:
+                            </span>
+                            <p className="text-[11px] text-slate-600 line-clamp-2 leading-relaxed">
+                              {p.text}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="pt-1 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => handleSelectSample(sample)}
+                          className="px-3 py-1 bg-sky-100 hover:bg-sky-200 text-sky-800 rounded-md text-xs font-bold transition-colors"
+                        >
+                          Select and Load "{sample.title}" →
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

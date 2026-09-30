@@ -12,11 +12,18 @@ import {
   Calendar,
   Layers,
   AlertCircle,
+  Eye,
+  EyeOff,
+  ChevronDown,
+  ChevronUp,
+  CheckCircle2,
+  XCircle,
 } from 'lucide-react';
 import {
   getStudentProgress,
   getUserProfile,
 } from '../services/storage';
+import { SAMPLE_EXAM_TAKES } from '../data/precomputedData';
 import {
   fetchStudyProgressFromSupabase,
   fetchStudentQuizAttempts,
@@ -40,6 +47,8 @@ export const MyProgressView: React.FC<MyProgressViewProps> = ({
   const [progress, setProgress] = useState<StudentProgress>(getStudentProgress());
   const [dbQuizzes, setDbQuizzes] = useState<RawQuizAttemptRow[]>([]);
   const [dbErrorMessage, setDbErrorMessage] = useState<string | null>(null);
+  const [showAllTakesExpanded, setShowAllTakesExpanded] = useState<boolean>(false);
+  const [showAllHistoryList, setShowAllHistoryList] = useState<boolean>(false);
   const user = getUserProfile();
 
   useEffect(() => {
@@ -207,41 +216,99 @@ export const MyProgressView: React.FC<MyProgressViewProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Quiz Scores & History */}
         <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
             <div className="flex items-center space-x-2">
               <div className="p-1.5 bg-indigo-100 text-indigo-700 rounded-lg">
                 <BarChart3 className="w-4 h-4" />
               </div>
-              <h3 className="text-base font-bold text-slate-900">Quiz History & Retention</h3>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Quiz History & Exam Takes</h3>
+                <span className="text-[11px] text-slate-400">
+                  {(() => {
+                    const allItems = dbQuizzes.length > 0 ? dbQuizzes : SAMPLE_EXAM_TAKES;
+                    if (allItems.length > 4 && !showAllHistoryList) {
+                      return `Showing 4 of ${allItems.length} Attempts`;
+                    }
+                    return dbQuizzes.length > 0 ? `${dbQuizzes.length} Attempts in Cloud` : '4 Sample Exam Takes Available';
+                  })()}
+                </span>
+              </div>
             </div>
-            <span className="text-xs font-semibold text-slate-400">Supabase Records ({dbQuizzes.length})</span>
-          </div>
 
-          {dbQuizzes.length === 0 ? (
-            <div className="p-6 bg-slate-50 rounded-xl text-center text-xs text-slate-500 space-y-2">
-              <p>No quiz attempts completed yet.</p>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {(() => {
+                const allItems = dbQuizzes.length > 0 ? dbQuizzes : SAMPLE_EXAM_TAKES;
+                return allItems.length > 4 ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllHistoryList((prev) => !prev)}
+                    className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 rounded-xl text-xs font-bold flex items-center space-x-1.5 transition-colors cursor-pointer"
+                  >
+                    {showAllHistoryList ? (
+                      <>
+                        <ChevronUp className="w-3.5 h-3.5" />
+                        <span>Limit to 4 Results</span>
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="w-3.5 h-3.5" />
+                        <span>Open to View Full List ({allItems.length})</span>
+                      </>
+                    )}
+                  </button>
+                ) : null;
+              })()}
+
               <button
-                onClick={onNavigateToQuiz}
-                className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg font-semibold inline-block cursor-pointer"
+                type="button"
+                onClick={() => setShowAllTakesExpanded((prev) => !prev)}
+                className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5 transition-colors shrink-0 shadow-xs cursor-pointer self-start sm:self-center"
               >
-                Generate First Quiz
+                {showAllTakesExpanded ? (
+                  <>
+                    <EyeOff className="w-3.5 h-3.5" />
+                    <span>Collapse All</span>
+                  </>
+                ) : (
+                  <>
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>Open All Exam Takes</span>
+                  </>
+                )}
               </button>
             </div>
-          ) : (
-            <div className="space-y-3">
-              {dbQuizzes.map((q) => {
-                const percentage = q.total_questions > 0 ? Math.round((q.score / q.total_questions) * 100) : 0;
-                const title = q.learning_materials?.title || q.learning_materials?.file_name || 'Practice Quiz';
-                const dateStr = q.created_at || q.completed_at ? new Date(q.created_at || q.completed_at!).toLocaleDateString() : 'Recent';
-                return (
-                  <div
-                    key={q.id}
-                    className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl flex items-center justify-between text-xs hover:border-indigo-200 transition-colors"
-                  >
+          </div>
+
+          {/* If there are live dbQuizzes, display them; otherwise display the 4 authentic SAMPLE_EXAM_TAKES */}
+          <div className="space-y-3">
+            {(() => {
+              const allItems = dbQuizzes.length > 0 ? dbQuizzes : SAMPLE_EXAM_TAKES;
+              const displayed = showAllHistoryList ? allItems : allItems.slice(0, 4);
+              return displayed.map((item: any, idx) => {
+              const isSample = !('total_questions' in item);
+              const totalQ = isSample ? item.totalQuestions : item.total_questions;
+              const score = item.score;
+              const percentage = totalQ > 0 ? Math.round((score / totalQ) * 100) : 0;
+              const title = isSample ? item.lessonTitle : (item.learning_materials?.title || 'Practice Quiz');
+              const dateStr = item.created_at || item.completedAt ? new Date(item.created_at || item.completedAt).toLocaleDateString() : 'Recent';
+
+              return (
+                <div
+                  key={item.id || idx}
+                  className="bg-slate-50 border border-slate-200/80 rounded-xl overflow-hidden hover:border-indigo-200 transition-colors"
+                >
+                  <div className="p-3.5 flex items-center justify-between text-xs">
                     <div className="space-y-0.5">
-                      <span className="font-bold text-slate-800 block text-sm">{title}</span>
+                      <div className="flex items-center space-x-2">
+                        {isSample && (
+                          <span className="text-[9px] font-bold uppercase tracking-wider bg-indigo-100 text-indigo-800 px-1.5 py-0.5 rounded">
+                            Sample Take {idx + 1}
+                          </span>
+                        )}
+                        <span className="font-bold text-slate-800 text-sm">{title}</span>
+                      </div>
                       <span className="text-slate-400 text-[11px]">
-                        {dateStr} • {q.total_questions} questions
+                        {dateStr} • {totalQ} questions
                       </span>
                     </div>
 
@@ -258,14 +325,73 @@ export const MyProgressView: React.FC<MyProgressViewProps> = ({
                         {percentage}%
                       </span>
                       <span className="text-[11px] text-slate-500 block">
-                        {q.score} / {q.total_questions}
+                        {score} / {totalQ}
                       </span>
                     </div>
                   </div>
-                );
-              })}
-            </div>
-          )}
+
+                  {/* Expanded question review when Open All is active */}
+                  {showAllTakesExpanded && isSample && item.answers && (
+                    <div className="px-3.5 py-2.5 bg-white border-t border-slate-200/80 space-y-2 text-xs">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                        Question Breakdown ({item.answers.length} Questions):
+                      </span>
+                      <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                        {item.answers.map((ans: any, qIdx: number) => (
+                          <div
+                            key={qIdx}
+                            className={`p-2 rounded-lg border text-[11px] ${
+                              ans.isCorrect
+                                ? 'bg-emerald-50/60 border-emerald-200 text-emerald-950'
+                                : 'bg-red-50/60 border-red-200 text-red-950'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-1">
+                              <span className="font-semibold">
+                                {qIdx + 1}. {ans.question}
+                              </span>
+                              <span className="shrink-0 font-bold">
+                                {ans.isCorrect ? '✓ Correct' : '✗ Missed'}
+                              </span>
+                            </div>
+                            <p className="text-[10px] text-slate-600 italic mt-0.5">
+                              {ans.explanation} {ans.sourcePage && `[Source: Page ${ans.sourcePage}]`}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            });
+            })()}
+          </div>
+
+          {(() => {
+            const allItems = dbQuizzes.length > 0 ? dbQuizzes : SAMPLE_EXAM_TAKES;
+            return allItems.length > 4 ? (
+              <div className="flex justify-center pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowAllHistoryList((prev) => !prev)}
+                  className="px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 rounded-xl text-xs font-bold flex items-center space-x-2 transition-colors cursor-pointer shadow-xs"
+                >
+                  {showAllHistoryList ? (
+                    <>
+                      <ChevronUp className="w-4 h-4" />
+                      <span>Limit to 4 Results</span>
+                    </>
+                  ) : (
+                    <>
+                      <ChevronDown className="w-4 h-4" />
+                      <span>Open to View Full List ({allItems.length} Exam Takes)</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            ) : null;
+          })()}
         </div>
 
         {/* Topics Studied & SDG 4 Impact */}

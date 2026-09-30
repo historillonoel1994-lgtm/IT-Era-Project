@@ -196,3 +196,128 @@ export interface AskTutorLog {
   page_reference?: string | number | null;
   created_at?: string;
 }
+
+// ==========================================
+// INTELLIGENT AUDIO LESSON SESSION TYPES
+// ==========================================
+
+export interface AudioSessionProgress {
+  studentId: string;
+  documentId: string;
+  documentTitle: string;
+  currentPage: number;
+  hasIntroduced: boolean;
+  completedPages: number[];
+  playbackRate: number;
+  lastAccessedAt: string;
+  isComplete: boolean;
+}
+
+// ==========================================
+// COMPLETE SELF-REVIEWER SYSTEM TYPES
+// ==========================================
+
+export interface DocumentChapter {
+  id: string;
+  title: string;
+  startPage: number;
+  endPage: number;
+  topics: string[];
+  summaryPreview?: string;
+}
+
+export type ReviewerDifficulty = 'easy' | 'medium' | 'hard' | 'professor';
+
+export type ReviewerQuestionType =
+  | 'mixed'
+  | 'multiple_choice'
+  | 'fill_in_the_blank'
+  | 'identification'
+  | 'true_false'
+  | 'concept_contrasts'
+  | 'scenario'
+  | 'short_answer';
+
+export interface ReviewerQuestion {
+  id: string;
+  type: ReviewerQuestionType;
+  difficulty: ReviewerDifficulty;
+  question: string;
+  options?: string[]; // For multiple choice & true/false
+  correctAnswer: string;
+  explanation: string;
+  sourcePage: number | string;
+  chapterOrSection?: string;
+  citationExcerpt?: string;
+  isSupplementary?: boolean; // Clearly labeled if supplementary explanation
+  rubricCriteria?: string[]; // For short answer / scenario evaluation
+  topic?: string;
+}
+
+export interface ReviewerUserAnswer {
+  questionId: string;
+  question: string;
+  userAnswer: string;
+  correctAnswer: string;
+  isCorrect: boolean;
+  explanation: string;
+  sourcePage: number | string;
+  chapterOrSection?: string;
+  citationExcerpt?: string;
+  isSupplementary?: boolean;
+}
+
+export interface ReviewerAttempt {
+  id: string;
+  userId?: string;
+  lessonId: string;
+  lessonTitle: string;
+  chapterOrSection?: string;
+  difficulty: ReviewerDifficulty;
+  mode: 'practice' | 'exam';
+  questionCount: number;
+  score: number;
+  percentage: number;
+  completedAt: string;
+  answers: ReviewerUserAnswer[];
+  questionsToReview: ReviewerUserAnswer[];
+  topicsToReview: string[];
+}
+
+export interface FlashcardItem {
+  id: string;
+  term: string;
+  definition: string;
+  sourcePage: number | string;
+  chapter?: string;
+  status?: 'mastered' | 'learning' | 'review_again';
+  isSupplementary?: boolean;
+}
+
+export interface ConceptContrastItem {
+  id: string;
+  conceptA: {
+    name: string;
+    definition: string;
+    sourcePage: number | string;
+  };
+  conceptB: {
+    name: string;
+    definition: string;
+    sourcePage: number | string;
+  };
+  mainDifferences: string[];
+  similarities: string[];
+  practicalExamples: string;
+  commonMisconceptions: string;
+  isSupplementary?: boolean;
+}
+
+export interface MemorizationLevelProgress {
+  level1_terms: number; // 0 - 100
+  level2_definitions: number; // 0 - 100
+  level3_own_words: number; // 0 - 100
+  level4_application: number; // 0 - 100
+  level5_mastery: number; // 0 - 100
+  recommendations: string[];
+}

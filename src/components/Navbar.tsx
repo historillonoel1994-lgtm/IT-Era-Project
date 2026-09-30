@@ -50,6 +50,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   isLoggedIn = false,
 }) => {
   const [showLessonDropdown, setShowLessonDropdown] = React.useState(false);
+  const [showAllLessons, setShowAllLessons] = React.useState(false);
 
   return (
     <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200 shadow-2xs">
@@ -84,11 +85,24 @@ export const Navbar: React.FC<NavbarProps> = ({
 
             {showLessonDropdown && (
               <div className="absolute left-0 mt-1.5 w-72 bg-white rounded-2xl shadow-xl border border-slate-200 p-2 z-50 animate-fadeIn">
-                <span className="text-[10px] font-bold text-slate-400 px-2 py-1 uppercase tracking-wider block">
-                  Select Active Lesson ({lessons.length})
-                </span>
+                <div className="flex items-center justify-between px-2 py-1">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                    {lessons.length > 4 && !showAllLessons
+                      ? `Select Active Lesson (4 of ${lessons.length})`
+                      : `Select Active Lesson (${lessons.length})`}
+                  </span>
+                  {lessons.length > 4 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllLessons((prev) => !prev)}
+                      className="text-[10px] font-bold text-sky-700 hover:text-sky-900 cursor-pointer"
+                    >
+                      {showAllLessons ? 'Show 4' : 'Open All'}
+                    </button>
+                  )}
+                </div>
                 <div className="max-h-60 overflow-y-auto space-y-1">
-                  {lessons.map((l) => (
+                  {(showAllLessons ? lessons : lessons.slice(0, 4)).map((l) => (
                     <button
                       key={l.id}
                       onClick={() => {

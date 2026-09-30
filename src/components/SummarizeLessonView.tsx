@@ -21,8 +21,7 @@ import { getStoredSummary, saveStoredSummary } from '../services/storage';
 import { PRECOMPUTED_SUMMARIES } from '../data/precomputedData';
 import { ResponsibleAiBanner } from './ResponsibleAiBanner';
 import { CitationModal } from './CitationModal';
-import { AudioTeachingPlayer } from './AudioTeachingPlayer';
-import { buildLessonAudioScript } from '../services/speech';
+import { FullLessonAudioPlayer } from './FullLessonAudioPlayer';
 
 interface SummarizeLessonViewProps {
   lesson: LessonDocument;
@@ -253,6 +252,9 @@ ${summary.quickReviewNotes
       {/* Prominent Safeguard Banner */}
       <ResponsibleAiBanner />
 
+      {/* Full Lesson Audio Center (Continuous Play & Summary Option) */}
+      <FullLessonAudioPlayer lesson={lesson} summary={summary} />
+
       {/* Error state */}
       {error && (
         <div className="p-4 bg-red-50 border border-red-200 rounded-2xl flex items-start space-x-3 text-sm text-red-800">
@@ -294,15 +296,6 @@ ${summary.quickReviewNotes
       {/* Summary Content */}
       {summary && (
         <div className="space-y-6">
-          {/* Audio Teaching for Uploaded Learning Material */}
-          <AudioTeachingPlayer
-            id={`audio-lesson-${lesson.id}`}
-            title={`Audio Teaching: ${lesson.title}`}
-            subtitle={`Listen to the core concepts and definitions of this ${lesson.subject} lesson — perfect for listening on shifts or commutes.`}
-            textToSpeak={buildLessonAudioScript(lesson.title, lesson.subject, summary, lesson.pages)}
-            variant="card"
-          />
-
           {/* Main Topic & Summary */}
           <div className="bg-white rounded-2xl border border-sky-100 p-6 shadow-sm relative overflow-hidden">
             <div className="absolute top-0 right-0 w-32 h-32 bg-sky-100/50 rounded-bl-full pointer-events-none" />

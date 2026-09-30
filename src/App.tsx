@@ -419,6 +419,8 @@ export default function App() {
           {currentTab === 'quiz' && (
             <GenerateQuizView
               lesson={activeLesson}
+              lessons={lessons}
+              onSelectLesson={handleSelectLesson}
               onOpenUpload={() => setIsUploadOpen(true)}
               onNavigateToSummary={() => setCurrentTab('summarize')}
               onNavigateToProgress={() => setCurrentTab('progress')}
