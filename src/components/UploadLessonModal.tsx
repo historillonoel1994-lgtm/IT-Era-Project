@@ -50,6 +50,7 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
   const [extractedPreview, setExtractedPreview] = useState<{
     totalPages: number;
     pages: { pageNumber: number; text: string }[];
+    chunks?: any[];
     fileType?: string;
   } | null>(null);
   const [uploadStatus, setUploadStatus] = useState<string>('');
@@ -104,6 +105,7 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
           setExtractedPreview({
             totalPages: parsed.totalPages,
             pages: parsed.pages,
+            chunks: parsed.chunks,
             fileType: parsed.fileType,
           });
         } catch (err: any) {
@@ -141,6 +143,7 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
       totalPages: extractedPreview.totalPages,
       uploadedAt: new Date().toISOString(),
       pages: extractedPreview.pages,
+      chunks: extractedPreview.chunks || [],
       isSample: false,
       fileType: extractedPreview.fileType || ext,
       fileName: file?.name,

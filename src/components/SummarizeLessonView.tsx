@@ -81,7 +81,16 @@ export const SummarizeLessonView: React.FC<SummarizeLessonViewProps> = ({
         const page1 = lesson.pages[0];
         const clientSummary: LessonSummary = {
           mainTopic: lesson.title,
+          summary: page1.text.split('\n').find((l) => l.trim().length > 30) || page1.text.slice(0, 260),
           simpleExplanation: page1.text.split('\n').find((l) => l.trim().length > 30) || page1.text.slice(0, 220),
+          keyPoints: lesson.pages.slice(0, 6).map((p, idx) => {
+            const firstSentence = p.text.match(/[^.!?]+[.!?]+/)?.[0]?.trim() || p.text.slice(0, 120);
+            return {
+              idea: firstSentence,
+              sourcePage: Number(p.pageNumber) || idx + 1,
+              citationExcerpt: firstSentence,
+            };
+          }),
           keyIdeas: lesson.pages.slice(0, 5).map((p, idx) => {
             const firstSentence = p.text.match(/[^.!?]+[.!?]+/)?.[0]?.trim() || p.text.slice(0, 100);
             return {
@@ -96,6 +105,16 @@ export const SummarizeLessonView: React.FC<SummarizeLessonViewProps> = ({
               definition: 'Foundational academic topic covered in this document.',
               sourcePage: 1,
             },
+          ],
+          studyPointers: [
+            {
+              pointer: `Focus on mastering the core principles on pages 1 to ${lesson.totalPages} for exams and recitations.`,
+              sourcePage: 1,
+              category: 'exam',
+            },
+          ],
+          relationshipsBetweenTopics: [
+            `Topics across pages 1 to ${lesson.totalPages} build progressively from foundational principles to applied problem-solving.`
           ],
           keyTakeaways: [
             {
@@ -128,16 +147,32 @@ export const SummarizeLessonView: React.FC<SummarizeLessonViewProps> = ({
 
   const handleCopyNotes = () => {
     if (!summary) return;
+    const keyPointsSection = summary.keyPoints && summary.keyPoints.length > 0
+      ? `\n## Key Points (Whole Document)\n${summary.keyPoints.map((k) => `- ${k.idea} [Source: Page ${k.sourcePage}]`).join('\n')}\n`
+      : '';
+
+    const studyPointersSection = summary.studyPointers && summary.studyPointers.length > 0
+      ? `\n## Study Pointers (For Quizzes & Exams)\n${summary.studyPointers.map((p) => `- [${(p.category || 'Exam').toUpperCase()}] ${p.pointer} [Source: Page ${p.sourcePage || 1}]`).join('\n')}\n`
+      : '';
+
+    const relationshipsSection = summary.relationshipsBetweenTopics && summary.relationshipsBetweenTopics.length > 0
+      ? `\n## Topic Relationships\n${summary.relationshipsBetweenTopics.map((r) => `- ${r}`).join('\n')}\n`
+      : '';
+
     const text = `# ${summary.mainTopic} (${lesson.title})
+
+## Summary
+${summary.summary || summary.simpleExplanation}
+
 ## Simple Explanation
 ${summary.simpleExplanation}
-
-## Key Ideas
+${keyPointsSection}
+## Key Ideas & Concepts
 ${summary.keyIdeas.map((k) => `- ${k.idea} [Source: Page ${k.sourcePage}]`).join('\n')}
 
 ## Important Terms
 ${summary.importantTerms.map((t) => `- **${t.term}**: ${t.definition} [Source: Page ${t.sourcePage}]`).join('\n')}
-
+${studyPointersSection}${relationshipsSection}
 ## Key Takeaways
 ${summary.keyTakeaways.map((t) => `- ${t.takeaway} [Source: Page ${t.sourcePage}]`).join('\n')}
 
@@ -268,57 +303,69 @@ ${summary.quickReviewNotes
             variant="card"
           />
 
-          {/* Main Topic & Simple Explanation */}
+          {/* Main Topic & Summary */}
           <div className="bg-white rounded-2xl border border-sky-100 p-6 shadow-sm relative overflow-hidden">
             <div className="absolute top-0 right-0 w-32 h-32 bg-sky-100/50 rounded-bl-full pointer-events-none" />
-            <div className="space-y-3 relative z-10">
+            <div className="space-y-4 relative z-10">
               <div className="flex items-center space-x-2">
                 <span className="text-xs font-bold uppercase tracking-wider text-sky-700 bg-sky-50 border border-sky-200/60 px-2.5 py-0.5 rounded-full">
                   Main Topic
                 </span>
-                <span className="text-xs text-slate-400">High-Yield Overview</span>
+                <span className="text-xs text-slate-400">High-Yield Document Overview</span>
               </div>
               <h3 className="text-2xl font-extrabold text-slate-900 tracking-tight">
                 {summary.mainTopic}
               </h3>
 
-              <div className="mt-3 p-4 bg-sky-50/70 border border-sky-200/70 rounded-xl">
-                <div className="flex items-center space-x-1.5 text-xs font-bold text-sky-900 mb-1">
+              {/* Clear student-friendly summary */}
+              <div className="p-4 bg-sky-50/70 border border-sky-200/70 rounded-xl space-y-1.5">
+                <div className="flex items-center space-x-1.5 text-xs font-bold text-sky-900">
                   <Sparkles className="w-3.5 h-3.5 text-sky-600" />
-                  <span>Simple Explanation (For Busy Working Students):</span>
+                  <span>Summary (Student-Friendly Overview):</span>
                 </div>
-                <p className="text-sm text-slate-800 leading-relaxed">
-                  {summary.simpleExplanation}
+                <p className="text-sm text-slate-800 leading-relaxed font-normal">
+                  {summary.summary || summary.simpleExplanation}
                 </p>
               </div>
+
+              {summary.summary && summary.simpleExplanation && summary.summary !== summary.simpleExplanation && (
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
+                  <span className="text-xs font-bold text-slate-700 block mb-1">In Plain Words:</span>
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    {summary.simpleExplanation}
+                  </p>
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Key Ideas Grid with Page citations */}
+          {/* Key Points (Spanning the Whole Uploaded Material) */}
           <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
-                <div className="p-1.5 bg-sky-100 text-sky-700 rounded-lg">
+                <div className="p-1.5 bg-indigo-100 text-indigo-700 rounded-lg">
                   <Bookmark className="w-4 h-4" />
                 </div>
                 <div>
-                  <h4 className="text-base font-bold text-slate-900">Key Ideas & Core Concepts</h4>
+                  <h4 className="text-base font-bold text-slate-900">Key Points (Whole Uploaded Material)</h4>
                   <p className="text-xs text-slate-500">
-                    Click any page badge to verify against the authentic textbook page
+                    Essential ideas spanning beginning, middle, and end sections with verifiable page citations
                   </p>
                 </div>
               </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
-              {summary.keyIdeas.map((item, idx) => (
+              {(summary.keyPoints && summary.keyPoints.length > 0 ? summary.keyPoints : summary.keyIdeas).map((item, idx) => (
                 <div
                   key={idx}
-                  className="p-4 rounded-xl border border-slate-200 hover:border-sky-300 bg-slate-50/50 hover:bg-sky-50/30 transition-all flex flex-col justify-between space-y-3"
+                  className="p-4 rounded-xl border border-slate-200 hover:border-indigo-300 bg-slate-50/50 hover:bg-indigo-50/30 transition-all flex flex-col justify-between space-y-3"
                 >
                   <div className="space-y-1.5">
                     <div className="flex items-start justify-between gap-2">
-                      <span className="text-xs font-bold text-slate-400">0{idx + 1}</span>
+                      <span className="text-xs font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200/60">
+                        Point #{idx + 1}
+                      </span>
                       <button
                         onClick={() => openInspector(item.sourcePage, item.citationExcerpt || item.idea)}
                         className="inline-flex items-center space-x-1 px-2.5 py-1 text-xs font-bold bg-sky-100 hover:bg-sky-200 text-sky-800 rounded-full transition-colors cursor-pointer"
@@ -343,7 +390,7 @@ ${summary.quickReviewNotes
             </div>
           </div>
 
-          {/* Two-column layout: Important Terms & Key Takeaways */}
+          {/* Two-column layout: Important Terms & Study Pointers */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {/* Important Terms */}
             <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">
@@ -353,11 +400,11 @@ ${summary.quickReviewNotes
                 </div>
                 <div>
                   <h4 className="text-base font-bold text-slate-900">Important Terms</h4>
-                  <p className="text-xs text-slate-500">Key definitions for exam recall</p>
+                  <p className="text-xs text-slate-500">Key definitions and vocabulary for recitation</p>
                 </div>
               </div>
 
-              <div className="space-y-3">
+              <div className="space-y-3 max-h-[380px] overflow-y-auto pr-1">
                 {summary.importantTerms.map((termItem, idx) => (
                   <div
                     key={idx}
@@ -382,20 +429,20 @@ ${summary.quickReviewNotes
               </div>
             </div>
 
-            {/* Key Takeaways */}
+            {/* Study Pointers (For Quizzes & Exams) */}
             <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">
               <div className="flex items-center space-x-2">
                 <div className="p-1.5 bg-emerald-100 text-emerald-800 rounded-lg">
                   <ListChecks className="w-4 h-4" />
                 </div>
                 <div>
-                  <h4 className="text-base font-bold text-slate-900">Key Takeaways</h4>
-                  <p className="text-xs text-slate-500">Core actionable concepts</p>
+                  <h4 className="text-base font-bold text-slate-900">Study Pointers</h4>
+                  <p className="text-xs text-slate-500">Must-remember points for quizzes, recitations & exams</p>
                 </div>
               </div>
 
-              <div className="space-y-3">
-                {summary.keyTakeaways.map((takeawayItem, idx) => (
+              <div className="space-y-3 max-h-[380px] overflow-y-auto pr-1">
+                {(summary.studyPointers && summary.studyPointers.length > 0 ? summary.studyPointers : summary.keyTakeaways.map((t) => ({ pointer: t.takeaway, sourcePage: t.sourcePage, category: 'exam' }))).map((pointerItem, idx) => (
                   <div
                     key={idx}
                     className="p-3.5 bg-emerald-50/50 border border-emerald-100 rounded-xl flex items-start space-x-3"
@@ -404,21 +451,89 @@ ${summary.quickReviewNotes
                       {idx + 1}
                     </span>
                     <div className="flex-1 space-y-1">
-                      <p className="text-xs font-semibold text-slate-800 leading-snug">
-                        {takeawayItem.takeaway}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                          {pointerItem.category || 'Exam Review'}
+                        </span>
+                        {pointerItem.sourcePage && (
+                          <button
+                            onClick={() => openInspector(pointerItem.sourcePage!, pointerItem.pointer)}
+                            className="text-[11px] font-semibold text-emerald-700 hover:underline cursor-pointer"
+                          >
+                            Page {pointerItem.sourcePage}
+                          </button>
+                        )}
+                      </div>
+                      <p className="text-xs font-semibold text-slate-800 leading-snug pt-0.5">
+                        {pointerItem.pointer}
                       </p>
-                      <button
-                        onClick={() => openInspector(takeawayItem.sourcePage, takeawayItem.takeaway)}
-                        className="text-[11px] font-semibold text-emerald-700 hover:underline cursor-pointer"
-                      >
-                        Source: Page {takeawayItem.sourcePage}
-                      </button>
                     </div>
                   </div>
                 ))}
               </div>
             </div>
           </div>
+
+          {/* Topic Relationships, Processes & Figures */}
+          {((summary.relationshipsBetweenTopics && summary.relationshipsBetweenTopics.length > 0) ||
+            (summary.processesOrProcedures && summary.processesOrProcedures.length > 0) ||
+            (summary.namesAndDates && summary.namesAndDates.length > 0)) && (
+            <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">
+              <div className="flex items-center space-x-2">
+                <div className="p-1.5 bg-purple-100 text-purple-800 rounded-lg">
+                  <Layers className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="text-base font-bold text-slate-900">Relationships, Processes & Figures</h4>
+                  <p className="text-xs text-slate-500">Structural connections across pages and chapters</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {summary.relationshipsBetweenTopics && summary.relationshipsBetweenTopics.length > 0 && (
+                  <div className="p-4 bg-purple-50/40 border border-purple-100 rounded-xl space-y-2">
+                    <h5 className="text-xs font-bold text-purple-900 uppercase tracking-wider">Topic Relationships</h5>
+                    <ul className="space-y-1.5 text-xs text-slate-700">
+                      {summary.relationshipsBetweenTopics.map((rel, idx) => (
+                        <li key={idx} className="flex items-start space-x-1.5">
+                          <span className="text-purple-600 font-bold">•</span>
+                          <span>{rel}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {summary.processesOrProcedures && summary.processesOrProcedures.length > 0 && (
+                  <div className="p-4 bg-blue-50/40 border border-blue-100 rounded-xl space-y-2">
+                    <h5 className="text-xs font-bold text-blue-900 uppercase tracking-wider">Key Processes & Steps</h5>
+                    <ul className="space-y-1.5 text-xs text-slate-700">
+                      {summary.processesOrProcedures.map((proc, idx) => (
+                        <li key={idx} className="flex items-start space-x-1.5">
+                          <span className="text-blue-600 font-bold">•</span>
+                          <span>{proc}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {summary.namesAndDates && summary.namesAndDates.length > 0 && (
+                  <div className="p-4 bg-amber-50/40 border border-amber-100 rounded-xl space-y-2">
+                    <h5 className="text-xs font-bold text-amber-900 uppercase tracking-wider">Names & Dates</h5>
+                    <ul className="space-y-1.5 text-xs text-slate-700">
+                      {summary.namesAndDates.map((nd, idx) => (
+                        <li key={idx} className="flex items-start space-x-1.5">
+                          <span className="text-amber-600 font-bold">•</span>
+                          <span>{nd}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Quick Review Notes */}
           <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">

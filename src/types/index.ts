@@ -24,6 +24,7 @@ export interface LessonDocument {
   fileType?: 'pdf' | 'docx' | 'doc' | 'pptx' | 'ppt' | 'xlsx' | 'xls' | 'csv' | 'txt' | 'other' | string;
   fileName?: string;
   filePath?: string;
+  chunks?: DocumentChunk[];
 }
 
 export interface KeyIdea {
@@ -49,13 +50,34 @@ export interface QuickReviewNote {
   sourcePage: number | string;
 }
 
+export interface StudyPointer {
+  pointer: string;
+  sourcePage?: number | string;
+  category?: 'quiz' | 'recitation' | 'exam' | 'concept' | string;
+}
+
+export interface DocumentChunk {
+  chunkId: string;
+  pageNumber: number | string;
+  text: string;
+  keywords?: string[];
+  charCount?: number;
+}
+
 export interface LessonSummary {
   mainTopic: string;
   simpleExplanation: string;
+  summary?: string;
   keyIdeas: KeyIdea[];
+  keyPoints?: KeyIdea[];
   importantTerms: ImportantTerm[];
+  studyPointers?: StudyPointer[];
+  relationshipsBetweenTopics?: string[];
+  processesOrProcedures?: string[];
+  namesAndDates?: string[];
   keyTakeaways: KeyTakeaway[];
   quickReviewNotes: QuickReviewNote[];
+  importantDetails?: string[];
   generatedAt: string;
 }
 
@@ -139,11 +161,17 @@ export interface ChatMessage {
   sourceLabel?: string;
   sourceNotice?: string;
   lessonTitle?: string;
-  mode?: 'lesson' | 'general';
+  mode?: 'materials' | 'feynman' | 'general' | 'lesson';
   answerLabel?: string;
   generalReminder?: string;
   sourcePage?: number | string;
+  sourceSection?: string;
   citationExcerpt?: string;
+  directAnswer?: string;
+  explanation?: string;
+  basedOnMaterial?: string;
+  keyPointToRemember?: string;
+  example?: string;
   timestamp: string;
   isSafeguardNotice?: boolean;
 }

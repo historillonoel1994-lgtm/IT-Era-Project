@@ -47,6 +47,7 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
   // Quiz configuration
   const [questionCount, setQuestionCount] = useState<5 | 10 | 15>(5);
   const [quizType, setQuizType] = useState<'multiple_choice' | 'true_false' | 'mixed'>('mixed');
+  const [quizFormat, setQuizFormat] = useState<'practice' | 'active_recall'>('practice');
 
   // Quiz state
   const [stage, setStage] = useState<'setup' | 'loading' | 'active' | 'completed'>('setup');
@@ -342,6 +343,50 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
             <p className="text-xs text-slate-500 max-w-md mx-auto">
               Configure your practice test. Questions are generated exclusively from your uploaded lesson pages to test genuine retention without extraneous fluff.
             </p>
+          </div>
+
+          {/* Quiz Mode: Practice Quiz vs Active Recall Quiz */}
+          <div className="space-y-2">
+            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+              Quiz Mode
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setQuizFormat('practice')}
+                className={`p-3.5 rounded-xl border text-left transition-all ${
+                  quizFormat === 'practice'
+                    ? 'border-indigo-600 bg-indigo-50/80 text-indigo-950 shadow-sm ring-2 ring-indigo-500/20'
+                    : 'border-slate-200 hover:border-slate-300 text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                <div className="flex items-center space-x-1.5">
+                  <span className="w-2 h-2 rounded-full bg-indigo-600" />
+                  <span className="text-xs font-bold text-slate-900">Practice Quiz</span>
+                </div>
+                <span className="text-[11px] text-slate-500 block mt-1">
+                  Comprehensive test across all uploaded document sections.
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setQuizFormat('active_recall')}
+                className={`p-3.5 rounded-xl border text-left transition-all ${
+                  quizFormat === 'active_recall'
+                    ? 'border-purple-600 bg-purple-50/80 text-purple-950 shadow-sm ring-2 ring-purple-500/20'
+                    : 'border-slate-200 hover:border-slate-300 text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                <div className="flex items-center space-x-1.5">
+                  <span className="w-2 h-2 rounded-full bg-purple-600" />
+                  <span className="text-xs font-bold text-slate-900">Active Recall Quiz</span>
+                </div>
+                <span className="text-[11px] text-slate-500 block mt-1">
+                  High-yield recall testing key terms, definitions & exam pointers.
+                </span>
+              </button>
+            </div>
           </div>
 
           {/* Question Count */}

@@ -1,4 +1,4 @@
-import { LessonDocument, LessonSummary, QuizQuestion, StudentProgress } from '../types';
+import { LessonDocument, LessonSummary, QuizQuestion, StudentProgress, DocumentChunk } from '../types';
 
 export interface SummarizeParams {
   pages: { pageNumber: number | string; text: string }[];
@@ -18,6 +18,7 @@ export interface AskTutorParams {
   lessonTitle: string;
   question: string;
   chatHistory?: { sender: 'user' | 'tutor'; text: string }[];
+  tutorMode?: 'materials' | 'feynman' | 'general';
 }
 
 export interface StudyPlanParams {
@@ -68,8 +69,14 @@ export interface AskTutorResult {
   indicator: string;
   sourceNotice?: string;
   answer: string;
-  sourcePage?: number;
+  sourcePage?: number | string;
+  sourceSection?: string;
   citationExcerpt?: string;
+  directAnswer?: string;
+  explanation?: string;
+  basedOnMaterial?: string;
+  keyPointToRemember?: string;
+  example?: string;
   lessonTitle?: string;
   isSafeguardTriggered?: boolean;
 }
@@ -171,6 +178,8 @@ export async function suggestStudySchedule(params: StudyPlanParams): Promise<{
 export interface ParsedDocumentResult {
   totalPages: number;
   pages: { pageNumber: number; text: string }[];
+  chunks?: DocumentChunk[];
+  fullTextLength?: number;
   fileType?: string;
   filename?: string;
 }

@@ -10,6 +10,9 @@ import {
   ArrowRight,
   RotateCcw,
   CheckCircle,
+  Lightbulb,
+  Globe,
+  Bookmark,
 } from 'lucide-react';
 import { LessonDocument, ChatMessage } from '../types';
 import { askStudyBuddy, askGemini } from '../services/api';
@@ -33,6 +36,14 @@ const LESSON_PRESET_QUESTIONS = [
   'Create a practice question.',
 ];
 
+const FEYNMAN_PRESET_QUESTIONS = [
+  'Explain the hardest concept simply.',
+  'Give me an everyday real-world analogy.',
+  'Connect this lesson to a daily job example.',
+  'How does this concept work in real life?',
+  'Break down the core formula/process.',
+];
+
 const GENERAL_PRESET_QUESTIONS = [
   'What is entrepreneurship?',
   'Explain supply and demand.',
@@ -46,7 +57,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
   onNavigateToSummary,
   onOpenUpload,
 }) => {
-  const [mode, setMode] = useState<'materials' | 'general'>('materials');
+  const [mode, setMode] = useState<'materials' | 'feynman' | 'general'>('materials');
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: 'welcome',
@@ -54,7 +65,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
       sourceType: 'material',
       sourceLabel: 'Source: Uploaded Learning Material',
       lessonTitle: lesson.title,
-      text: `Hello! I'm **Study Buddy**, your dedicated AI learning tutor. I have read **${lesson.title}** (${lesson.totalPages} pages).\n\nI operate an automatic **Two-Source Answer System**:\n• **📘 Uploaded Learning Material**: If your question is covered in your uploaded document, I answer strictly using your lesson pages with verifiable page citations.\n• **✨ Gemini / Google AI**: If your question is outside or not covered in your lesson, I answer using Gemini general knowledge with a clear disclaimer notice.\n\nAsk me anything about your lesson or general academic concepts to get started!`,
+      text: `Hello! I'm **Study Buddy**, your dedicated AI learning tutor. I have read **${lesson.title}** (${lesson.totalPages} pages).\n\nI operate an automatic **Two-Source Answer System**:\n• **📘 Uploaded Learning Material**: If your question is covered in your uploaded document, I search your document first and answer strictly using your lesson pages with verifiable page citations.\n• **✨ Gemini / Google AI**: If your question is outside or not covered in your lesson, I answer using Gemini general knowledge with a clear disclaimer notice.\n\nYou can also switch to **💡 Feynman Tutor** mode for simplified everyday analogies!\n\nAsk me anything to get started!`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     },
   ]);
@@ -104,7 +115,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
           sourceType: 'gemini',
           sourceLabel: 'Source: Gemini / Google AI',
           sourceNotice:
-            'This question is not covered by your uploaded learning materials. The answer below is provided using Gemini / Google AI general knowledge.',
+            'This topic is not directly discussed in your uploaded learning material. The following answer is based on general Gemini knowledge.',
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
         setMessages((prev) => [...prev, tutorMsg]);
@@ -149,25 +160,34 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
         lessonTitle: lesson.title,
         question: trimmed,
         chatHistory: historyContext,
+        tutorMode: mode,
       });
 
+      const cleanAnswer = (res.answer || '').replace(/\n*Checking Question:\s*[\s\S]*?$/i, '').trim();
       const tutorMsg: ChatMessage = {
         id: `msg-tutor-${Date.now()}`,
         sender: 'tutor',
-        text: res.answer,
+        text: cleanAnswer,
         sourceType: res.sourceType,
         sourceLabel: res.sourceLabel,
         sourceNotice: res.sourceNotice,
         sourcePage: res.sourcePage,
+        sourceSection: res.sourceSection,
         citationExcerpt: res.citationExcerpt,
+        directAnswer: res.directAnswer,
+        explanation: res.explanation,
+        basedOnMaterial: res.basedOnMaterial,
+        keyPointToRemember: res.keyPointToRemember,
+        example: res.example,
         lessonTitle: res.lessonTitle || lesson.title,
+        mode,
         isSafeguardNotice: res.isSafeguardTriggered,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
 
       setMessages((prev) => [...prev, tutorMsg]);
 
-      // Save record to ask_tutor_logs for logged-in student
+      // Save record to ask_tutor_logs in Supabase
       const isMaterial = res.sourceType === 'material';
       logAskTutorQuestion({
         question: trimmed,
@@ -217,26 +237,38 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
       if (bestP && bestHits > 0) {
         const pageNum = Number(bestP.pageNumber) || 1;
         const excerpt = matchedQuote || bestP.text.trim().slice(0, 160);
+        const directAns = `In ${lesson.title}, ${excerpt}`;
+        const expl = `This concept is discussed on Page ${pageNum} of ${lesson.title}.`;
+        const basedOnMat = `Directly from Page ${pageNum}: "${excerpt}"`;
+        const kp = `Review Page ${pageNum} to understand how this connects to the broader topic.`;
+        const formatted = `Answer:\n${directAns}\n\nExplanation:\n${expl}\n\nBased on the uploaded material:\n${basedOnMat}\n\nSource:\nPage ${pageNum}\n\nKey Point to Remember:\n${kp}`;
+
         const tutorMsg: ChatMessage = {
           id: `msg-tutor-${Date.now()}`,
           sender: 'tutor',
-          text: `Based on Page ${pageNum} of your uploaded material:\n\n"${excerpt}"\n\nThis directly answers your question regarding "${trimmed}".`,
+          text: formatted,
+          directAnswer: directAns,
+          explanation: expl,
+          basedOnMaterial: basedOnMat,
+          keyPointToRemember: kp,
           sourceType: 'material',
           sourceLabel: 'Source: Uploaded Learning Material',
           sourcePage: pageNum,
           citationExcerpt: excerpt,
           lessonTitle: lesson.title,
+          mode,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
         setMessages((prev) => [...prev, tutorMsg]);
       } else {
+        const notice = 'This topic is not directly discussed in your uploaded learning material. The following answer is based on general Gemini knowledge.';
         const tutorMsg: ChatMessage = {
           id: `msg-tutor-${Date.now()}`,
           sender: 'tutor',
-          text: `Here is a helpful explanation for "${trimmed}":\n\nThis is a relevant academic concept in ${lesson.title}. Be sure to review the primary section headings and vocabulary terms on pages 1 to ${lesson.totalPages}. Feel free to ask more specific questions about any page!`,
+          text: `${notice}\n\nHere is a helpful explanation for "${trimmed}":\n\nThis is a relevant academic concept in ${lesson.title}. Be sure to review the primary section headings and vocabulary terms on pages 1 to ${lesson.totalPages}. Feel free to ask more specific questions about any page!`,
           sourceType: 'gemini',
           sourceLabel: 'Source: Study Buddy Tutor',
-          sourceNotice: 'Study Buddy is responding in offline tutor mode.',
+          sourceNotice: notice,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
         setMessages((prev) => [...prev, tutorMsg]);
@@ -270,8 +302,9 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
     ]);
   };
 
-  // Helper to render message text with Markdown-style bold and bullet points
-  const renderMessageContent = (text: string) => {
+  // Helper to render message text or structured Answer/Explanation/Based on material/Source/Key point blocks
+  const renderMessageContent = (msg: ChatMessage) => {
+    const text = msg.text;
     // Check if safeguard alert
     const isSafeguardText =
       text.includes('I could not find enough information in your uploaded lesson') ||
@@ -294,8 +327,110 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
       );
     }
 
-    // Split paragraphs and lines
-    const paragraphs = text.split('\n');
+    // Strip any checking question from text so it never displays
+    const cleanText = text.replace(/\n*Checking Question:\s*[\s\S]*?$/i, '').trim();
+
+    // Check if structured answer format is present either in fields or parsed in text
+    const hasStructuredFields = Boolean(msg.directAnswer || msg.basedOnMaterial || msg.keyPointToRemember);
+    const hasStructuredText = cleanText.includes('Answer:') && (cleanText.includes('Explanation:') || cleanText.includes('Based on the uploaded material:'));
+
+    if (msg.sender === 'tutor' && (hasStructuredFields || hasStructuredText)) {
+      // Extract components either from fields or text regex
+      let directAnswer = msg.directAnswer || '';
+      let explanation = msg.explanation || '';
+      let example = msg.example || '';
+      let basedOnMaterial = msg.basedOnMaterial || '';
+      let keyPoint = msg.keyPointToRemember || '';
+
+      if (!directAnswer && hasStructuredText) {
+        const directMatch = cleanText.match(/Answer:\s*([\s\S]*?)(?=\n(?:Explanation|Example|Based on the uploaded material|Source|Key Point to Remember):|$)/i);
+        if (directMatch) directAnswer = directMatch[1].trim();
+
+        const explMatch = cleanText.match(/Explanation:\s*([\s\S]*?)(?=\n(?:Example|Based on the uploaded material|Source|Key Point to Remember):|$)/i);
+        if (explMatch) explanation = explMatch[1].trim();
+
+        const exMatch = cleanText.match(/Example:\s*([\s\S]*?)(?=\n(?:Based on the uploaded material|Source|Key Point to Remember):|$)/i);
+        if (exMatch) example = exMatch[1].trim();
+
+        const matMatch = cleanText.match(/Based on the uploaded material:\s*([\s\S]*?)(?=\n(?:Source|Key Point to Remember):|$)/i);
+        if (matMatch) basedOnMaterial = matMatch[1].trim();
+
+        const kpMatch = cleanText.match(/Key Point to Remember:\s*([\s\S]*?)$/i);
+        if (kpMatch) keyPoint = kpMatch[1].trim();
+      }
+
+      return (
+        <div className="space-y-3 pt-1">
+          {/* 1. Direct Answer */}
+          {directAnswer && (
+            <div className="space-y-1">
+              <span className="text-[11px] font-bold text-sky-900 uppercase tracking-wider block">
+                Answer:
+              </span>
+              <p className="text-sm font-semibold text-slate-900 leading-snug">
+                {directAnswer}
+              </p>
+            </div>
+          )}
+
+          {/* 2. Simple Explanation */}
+          {explanation && (
+            <div className="p-3 bg-white/80 border border-slate-200/80 rounded-xl space-y-1">
+              <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider block">
+                Explanation:
+              </span>
+              <p className="text-xs sm:text-sm text-slate-700 leading-relaxed font-normal">
+                {explanation}
+              </p>
+            </div>
+          )}
+
+          {/* 3. Everyday Example / Analogy (Feynman Mode) */}
+          {example && (
+            <div className="p-3 bg-purple-50/70 border border-purple-200/70 rounded-xl space-y-1 text-purple-950">
+              <div className="flex items-center space-x-1.5 text-xs font-bold text-purple-900">
+                <Lightbulb className="w-3.5 h-3.5 text-purple-600" />
+                <span>Example / Relatable Analogy:</span>
+              </div>
+              <p className="text-xs text-purple-900/90 leading-relaxed">
+                {example}
+              </p>
+            </div>
+          )}
+
+          {/* 4. Based on Uploaded Material */}
+          {basedOnMaterial && (
+            <div className="p-3 bg-sky-50/80 border border-sky-200/80 rounded-xl space-y-1">
+              <div className="flex items-center space-x-1.5 text-xs font-bold text-sky-900">
+                <BookOpen className="w-3.5 h-3.5 text-sky-700" />
+                <span>Based on the uploaded material:</span>
+              </div>
+              <p className="text-xs text-sky-950 leading-relaxed font-serif italic">
+                "{basedOnMaterial.replace(/^["']|["']$/g, '')}"
+              </p>
+            </div>
+          )}
+
+          {/* 5. Key Point to Remember */}
+          {keyPoint && (
+            <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-start space-x-2 text-emerald-950">
+              <Bookmark className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-800 block">
+                  Key Point to Remember:
+                </span>
+                <p className="text-xs font-medium text-emerald-900">
+                  {keyPoint}
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // Default markdown paragraph rendering
+    const paragraphs = cleanText.split('\n');
     return (
       <div className="space-y-2 text-sm leading-relaxed">
         {paragraphs.map((para, idx) => {
@@ -340,18 +475,24 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
                 </span>
               </div>
               <h2 className="text-xl font-bold text-slate-900 mt-1">
-                {mode === 'general' ? 'Ask General Educational Questions' : `Ask Questions about "${lesson.title}"`}
+                {mode === 'general'
+                  ? 'Ask General Educational Questions'
+                  : mode === 'feynman'
+                  ? `Feynman Tutor: "${lesson.title}"`
+                  : `Ask Questions about "${lesson.title}"`}
               </h2>
               <p className="text-xs text-slate-500 font-medium">
                 {mode === 'general'
                   ? 'Direct AI educational answers powered by Gemini Flash general knowledge'
-                  : `Smart Two-Source Tutor: Prioritizes ${lesson.totalPages} pages of "${lesson.title}" and falls back to Gemini`}
+                  : mode === 'feynman'
+                  ? 'Explains complex concepts in simple words with relatable everyday analogies'
+                  : `Prioritizes all ${lesson.totalPages} pages of extracted material, returning exact page citations`}
               </p>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-            {/* Two Modes Switcher */}
+            {/* Three Modes Switcher */}
             <div className="flex items-center p-1 bg-slate-100 rounded-xl border border-slate-200/70">
               <button
                 type="button"
@@ -361,21 +502,36 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
                     ? 'bg-white text-sky-900 shadow-xs'
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
+                title="Search uploaded document first, answers with page citations"
               >
                 <BookOpen className="w-3.5 h-3.5 text-sky-600" />
-                <span>Two-Source AI (Auto)</span>
+                <span>Uploaded Material</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode('feynman')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all cursor-pointer ${
+                  mode === 'feynman'
+                    ? 'bg-white text-purple-900 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+                title="Simple explanations, everyday analogies, and comprehension check questions"
+              >
+                <Lightbulb className="w-3.5 h-3.5 text-purple-600" />
+                <span>Feynman Tutor</span>
               </button>
               <button
                 type="button"
                 onClick={() => setMode('general')}
                 className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all cursor-pointer ${
                   mode === 'general'
-                    ? 'bg-white text-sky-900 shadow-xs'
+                    ? 'bg-white text-amber-900 shadow-xs'
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
+                title="Ask broad academic questions outside the uploaded document"
               >
-                <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                <span>General AI Question</span>
+                <Globe className="w-3.5 h-3.5 text-amber-600" />
+                <span>Ask Outside</span>
               </button>
             </div>
 
@@ -405,7 +561,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
       <ResponsibleAiBanner />
 
       {/* Audio Teaching for Uploaded Learning Material */}
-      {mode === 'materials' && (
+      {mode !== 'general' && (
         <AudioTeachingPlayer
           id={`tutor-lesson-audio-${lesson.id}`}
           title={`Audio Teaching: ${lesson.title}`}
@@ -420,9 +576,9 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
         {/* Preset quick question chips */}
         <div className="px-5 py-3 border-b border-slate-100 bg-slate-50/70 flex items-center space-x-2 overflow-x-auto no-scrollbar">
           <span className="text-xs font-bold text-slate-400 shrink-0">
-            {mode === 'general' ? 'General Prompts:' : 'Suggested:'}
+            {mode === 'general' ? 'General Prompts:' : mode === 'feynman' ? 'Feynman Prompts:' : 'Suggested:'}
           </span>
-          {(mode === 'general' ? GENERAL_PRESET_QUESTIONS : LESSON_PRESET_QUESTIONS).map((chip, idx) => (
+          {(mode === 'general' ? GENERAL_PRESET_QUESTIONS : mode === 'feynman' ? FEYNMAN_PRESET_QUESTIONS : LESSON_PRESET_QUESTIONS).map((chip, idx) => (
             <button
               key={idx}
               onClick={() => handleSend(chip)}
@@ -510,7 +666,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
                   )}
 
                   {/* Main Message Body */}
-                  {renderMessageContent(msg.text)}
+                  {renderMessageContent(msg)}
 
                   {/* Source citation: ONLY for Uploaded Learning Material (Never show false citations for Gemini) */}
                   {isTutor && !isGeminiSource && (msg.sourcePage || msg.lessonTitle) && (
