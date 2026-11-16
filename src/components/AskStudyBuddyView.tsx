@@ -13,14 +13,18 @@ import {
   Lightbulb,
   Globe,
   Bookmark,
+  RefreshCw,
+  Loader2,
+  Upload,
 } from 'lucide-react';
-import { LessonDocument, ChatMessage } from '../types';
+import { LessonDocument, ChatMessage, DocumentProcessingStatus } from '../types';
 import { askStudyBuddy, askGemini } from '../services/api';
 import { logAskTutorQuestion } from '../lib/supabase';
 import { ResponsibleAiBanner } from './ResponsibleAiBanner';
 import { CitationModal } from './CitationModal';
 import { AudioTeachingPlayer } from './AudioTeachingPlayer';
 import { buildLessonAudioScript } from '../services/speech';
+import { loadAndReconstructLesson, isPlaceholderContent } from '../services/storage';
 
 interface AskStudyBuddyViewProps {
   lesson: LessonDocument;
@@ -57,21 +61,108 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
   onNavigateToSummary,
   onOpenUpload,
 }) => {
+  const [currentDoc, setCurrentDoc] = useState<LessonDocument>(lesson);
+  const [docStatus, setDocStatus] = useState<DocumentProcessingStatus>(() => {
+    if (isPlaceholderContent(lesson.pages)) return lesson.processingStatus || 'reprocessing_required';
+    return lesson.processingStatus || 'ready';
+  });
+  const [isReprocessing, setIsReprocessing] = useState<boolean>(false);
+  const [reprocessNotice, setReprocessNotice] = useState<string | null>(null);
+
   const [mode, setMode] = useState<'materials' | 'feynman' | 'general'>('materials');
-  const [messages, setMessages] = useState<ChatMessage[]>([
+  const [messages, setMessages] = useState<ChatMessage[]>(() => [
     {
       id: 'welcome',
       sender: 'tutor',
       sourceType: 'material',
       sourceLabel: 'Source: Uploaded Learning Material',
       lessonTitle: lesson.title,
-      text: `Hello! I'm **Study Buddy**, your dedicated AI learning tutor. I have read **${lesson.title}** (${lesson.totalPages} pages).\n\nI operate an automatic **Two-Source Answer System**:\n• **📘 Uploaded Learning Material**: If your question is covered in your uploaded document, I search your document first and answer strictly using your lesson pages with verifiable page citations.\n• **✨ Gemini / Google AI**: If your question is outside or not covered in your lesson, I answer using Gemini general knowledge with a clear disclaimer notice.\n\nYou can also switch to **💡 Feynman Tutor** mode for simplified everyday analogies!\n\nAsk me anything to get started!`,
+      text: isPlaceholderContent(lesson.pages)
+        ? `I have detected **${lesson.title}**, but its complete page content needs to be verified before answering document-specific questions.`
+        : `Hello! I'm **Study Buddy**, your dedicated AI learning tutor. I have read **${lesson.title}** (${lesson.totalPages} pages).\n\nI operate an automatic **Two-Source Answer System**:\n• **📘 Uploaded Learning Material**: If your question is covered in your uploaded document, I search your document first and answer strictly using your lesson pages with verifiable page citations.\n• **✨ Gemini / Google AI**: If your question is outside or not covered in your lesson, I answer using Gemini general knowledge with a clear disclaimer notice.\n\nYou can also switch to **💡 Feynman Tutor** mode for simplified everyday analogies!\n\nAsk me anything to get started!`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     },
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-verify document status and trigger reconstruction if incomplete
+  useEffect(() => {
+    setCurrentDoc(lesson);
+    const isPlaceholder = isPlaceholderContent(lesson.pages);
+
+    if (isPlaceholder || lesson.processingStatus === 'reprocessing_required') {
+      setDocStatus('processing');
+      setIsReprocessing(true);
+      loadAndReconstructLesson(lesson.id)
+        .then((reconstructed) => {
+          if (!isPlaceholderContent(reconstructed.pages)) {
+            setCurrentDoc(reconstructed);
+            setDocStatus('ready');
+            setReprocessNotice(null);
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `verified-${Date.now()}`,
+                sender: 'tutor',
+                sourceType: 'material',
+                sourceLabel: 'Source: Uploaded Learning Material',
+                lessonTitle: reconstructed.title,
+                text: `Complete document loaded! I have read all **${reconstructed.totalPages} pages** of **${reconstructed.title}**. Ask me any question, definition, formula, or concept from this material!`,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              },
+            ]);
+          } else {
+            setDocStatus('reprocessing_required');
+            setReprocessNotice('This learning material needs to be processed again to access its complete content.');
+          }
+        })
+        .catch(() => {
+          setDocStatus('reprocessing_required');
+          setReprocessNotice('This learning material needs to be processed again to access its complete content.');
+        })
+        .finally(() => {
+          setIsReprocessing(false);
+        });
+    } else {
+      setDocStatus('ready');
+      setReprocessNotice(null);
+    }
+  }, [lesson.id, lesson.pages, lesson.processingStatus]);
+
+  const handleReprocessDocument = async () => {
+    setIsReprocessing(true);
+    setDocStatus('processing');
+    setReprocessNotice(null);
+    try {
+      const reconstructed = await loadAndReconstructLesson(currentDoc.id, { forceReprocess: true });
+      if (!isPlaceholderContent(reconstructed.pages)) {
+        setCurrentDoc(reconstructed);
+        setDocStatus('ready');
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `reprocessed-${Date.now()}`,
+            sender: 'tutor',
+            sourceType: 'material',
+            sourceLabel: 'Source: Uploaded Learning Material',
+            lessonTitle: reconstructed.title,
+            text: `Document processed successfully! All ${reconstructed.totalPages} pages are ready for question-and-answer.`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+        ]);
+      } else {
+        setDocStatus('reprocessing_required');
+        setReprocessNotice('This learning material needs to be processed again to access its complete content.');
+      }
+    } catch {
+      setDocStatus('reprocessing_required');
+      setReprocessNotice('This learning material needs to be processed again to access its complete content.');
+    } finally {
+      setIsReprocessing(false);
+    }
+  };
 
   // Citation inspector
   const [inspectPage, setInspectPage] = useState<number | string | null>(null);
@@ -149,6 +240,18 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
       return;
     }
 
+    if (docStatus !== 'ready') {
+      const warningMsg: ChatMessage = {
+        id: `msg-warning-${Date.now()}`,
+        sender: 'tutor',
+        text: 'This learning material needs to be processed again to access its complete content. Please click "Reprocess Learning Material" above to extract all pages.',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      };
+      setMessages((prev) => [...prev, warningMsg]);
+      setLoading(false);
+      return;
+    }
+
     try {
       const historyContext = messages.map((m) => ({
         sender: m.sender,
@@ -156,11 +259,14 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
       }));
 
       const res = await askStudyBuddy({
-        pages: lesson.pages,
-        lessonTitle: lesson.title,
+        pages: currentDoc.pages,
+        lessonTitle: currentDoc.title,
         question: trimmed,
         chatHistory: historyContext,
         tutorMode: mode,
+        lessonId: currentDoc.id,
+        documentId: currentDoc.id,
+        filename: currentDoc.fileName,
       });
 
       const cleanAnswer = (res.answer || '').replace(/\n*Checking Question:\s*[\s\S]*?$/i, '').trim();
@@ -179,7 +285,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
         basedOnMaterial: res.basedOnMaterial,
         keyPointToRemember: res.keyPointToRemember,
         example: res.example,
-        lessonTitle: res.lessonTitle || lesson.title,
+        lessonTitle: res.lessonTitle || currentDoc.title,
         mode,
         isSafeguardNotice: res.isSafeguardTriggered,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -193,7 +299,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
         question: trimmed,
         answer: res.answer,
         sourceType: isMaterial ? 'uploaded_material' : 'gemini',
-        materialTitle: isMaterial ? (res.lessonTitle || lesson.title || null) : null,
+        materialTitle: isMaterial ? (res.lessonTitle || currentDoc.title || null) : null,
         pageReference: isMaterial
           ? (res.sourcePage ? `Page ${res.sourcePage}` : (res.citationExcerpt || null))
           : null,
@@ -203,8 +309,8 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
     } catch (err: any) {
       console.error('Tutor chat error:', err);
 
-      // Intelligent client-side page search fallback so student is never blocked
-      const safePages = lesson.pages || [];
+      // Intelligent client-side page search fallback using complete currentDoc
+      const safePages = currentDoc.pages || [];
       const qKeywords = trimmed
         .toLowerCase()
         .replace(/[^a-z0-9\s]/g, ' ')
@@ -237,8 +343,8 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
       if (bestP && bestHits > 0) {
         const pageNum = Number(bestP.pageNumber) || 1;
         const excerpt = matchedQuote || bestP.text.trim().slice(0, 160);
-        const directAns = `In ${lesson.title}, ${excerpt}`;
-        const expl = `This concept is discussed on Page ${pageNum} of ${lesson.title}.`;
+        const directAns = `In ${currentDoc.title}, ${excerpt}`;
+        const expl = `This concept is discussed on Page ${pageNum} of ${currentDoc.title}.`;
         const basedOnMat = `Directly from Page ${pageNum}: "${excerpt}"`;
         const kp = `Review Page ${pageNum} to understand how this connects to the broader topic.`;
         const formatted = `Answer:\n${directAns}\n\nExplanation:\n${expl}\n\nBased on the uploaded material:\n${basedOnMat}\n\nSource:\nPage ${pageNum}\n\nKey Point to Remember:\n${kp}`;
@@ -255,7 +361,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
           sourceLabel: 'Source: Uploaded Learning Material',
           sourcePage: pageNum,
           citationExcerpt: excerpt,
-          lessonTitle: lesson.title,
+          lessonTitle: currentDoc.title,
           mode,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
@@ -265,7 +371,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
         const tutorMsg: ChatMessage = {
           id: `msg-tutor-${Date.now()}`,
           sender: 'tutor',
-          text: `${notice}\n\nHere is a helpful explanation for "${trimmed}":\n\nThis is a relevant academic concept in ${lesson.title}. Be sure to review the primary section headings and vocabulary terms on pages 1 to ${lesson.totalPages}. Feel free to ask more specific questions about any page!`,
+          text: `${notice}\n\nHere is a helpful explanation for "${trimmed}":\n\nThis is a relevant academic concept in ${currentDoc.title}. Be sure to review the primary section headings and vocabulary terms on pages 1 to ${currentDoc.totalPages}. Feel free to ask more specific questions about any page!`,
           sourceType: 'gemini',
           sourceLabel: 'Source: Study Buddy Tutor',
           sourceNotice: notice,
@@ -560,13 +666,112 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
 
       <ResponsibleAiBanner />
 
+      {/* Document Processing Status Alert */}
+      {docStatus === 'reprocessing_required' && (
+        <div className="bg-amber-50 border border-amber-300 rounded-2xl p-5 text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xs">
+          <div className="flex items-start space-x-3.5">
+            <div className="p-2.5 bg-amber-200/60 rounded-xl text-amber-800 shrink-0">
+              <AlertTriangle className="w-5 h-5 text-amber-700" />
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center space-x-2">
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-amber-900 bg-amber-200/80 px-2 py-0.5 rounded-full border border-amber-300/80">
+                  Reprocessing Required
+                </span>
+                <span className="text-xs font-bold text-amber-900">
+                  {currentDoc.title}
+                </span>
+              </div>
+              <p className="text-sm font-bold text-amber-950">
+                This learning material needs to be processed again to access its complete content.
+              </p>
+              <p className="text-xs text-amber-800/90 leading-relaxed">
+                Before Study Buddy can answer questions with page citations or generate summaries, the complete document text must be extracted. Click below to automatically retrieve and process all pages.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center space-x-2 shrink-0">
+            <button
+              onClick={handleReprocessDocument}
+              disabled={isReprocessing}
+              className="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center space-x-1.5 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isReprocessing ? 'animate-spin' : ''}`} />
+              <span>{isReprocessing ? 'Processing...' : 'Reprocess Learning Material'}</span>
+            </button>
+            <button
+              onClick={onOpenUpload}
+              className="px-3 py-2 bg-white hover:bg-amber-100 text-amber-900 border border-amber-300 font-semibold text-xs rounded-xl transition-colors cursor-pointer"
+            >
+              Upload New File
+            </button>
+          </div>
+        </div>
+      )}
+
+      {docStatus === 'processing_failed' && (
+        <div className="bg-rose-50 border border-rose-300 rounded-2xl p-5 text-rose-950 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xs">
+          <div className="flex items-start space-x-3.5">
+            <div className="p-2.5 bg-rose-200/60 rounded-xl text-rose-800 shrink-0">
+              <AlertTriangle className="w-5 h-5 text-rose-700" />
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center space-x-2">
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-rose-900 bg-rose-200/80 px-2 py-0.5 rounded-full border border-rose-300/80">
+                  Processing Failed
+                </span>
+                <span className="text-xs font-bold text-rose-900">
+                  {currentDoc.title}
+                </span>
+              </div>
+              <p className="text-sm font-bold text-rose-950">
+                Text extraction could not be completed for this file.
+              </p>
+              <p className="text-xs text-rose-800/90 leading-relaxed">
+                The stored file could not be parsed into readable pages. You can attempt to reprocess or upload a clean PDF, DOCX, or text file.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center space-x-2 shrink-0">
+            <button
+              onClick={handleReprocessDocument}
+              disabled={isReprocessing}
+              className="px-4 py-2 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center space-x-1.5 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isReprocessing ? 'animate-spin' : ''}`} />
+              <span>Retry Processing</span>
+            </button>
+            <button
+              onClick={onOpenUpload}
+              className="px-3 py-2 bg-white hover:bg-rose-100 text-rose-900 border border-rose-300 font-semibold text-xs rounded-xl transition-colors cursor-pointer"
+            >
+              Upload New File
+            </button>
+          </div>
+        </div>
+      )}
+
+      {docStatus === 'processing' && (
+        <div className="bg-sky-50 border border-sky-300 rounded-2xl p-4 text-sky-950 flex items-center space-x-3 shadow-xs">
+          <Loader2 className="w-5 h-5 text-sky-600 animate-spin shrink-0" />
+          <div>
+            <span className="text-[10px] font-extrabold uppercase tracking-wider text-sky-900 bg-sky-200/80 px-2 py-0.5 rounded-full border border-sky-300/80 inline-block mb-0.5">
+              Processing Document
+            </span>
+            <p className="text-xs sm:text-sm font-bold text-sky-950">
+              Extracting and reconstructing complete page contents for {currentDoc.title}...
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Audio Teaching for Uploaded Learning Material */}
-      {mode !== 'general' && (
+      {mode !== 'general' && docStatus === 'ready' && (
         <AudioTeachingPlayer
-          id={`tutor-lesson-audio-${lesson.id}`}
-          title={`Audio Teaching: ${lesson.title}`}
-          subtitle={`Listen to the audio lesson guide (${lesson.totalPages} pages) while asking questions.`}
-          textToSpeak={buildLessonAudioScript(lesson.title, lesson.subject, null, lesson.pages)}
+          id={`tutor-lesson-audio-${currentDoc.id}`}
+          title={`Audio Teaching: ${currentDoc.title}`}
+          subtitle={`Listen to the audio lesson guide (${currentDoc.totalPages} pages) while asking questions.`}
+          textToSpeak={buildLessonAudioScript(currentDoc.title, currentDoc.subject, null, currentDoc.pages)}
           variant="compact"
         />
       )}
@@ -787,7 +992,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
           isOpen={inspectPage !== null}
           onClose={() => setInspectPage(null)}
           pageNumber={inspectPage}
-          lesson={lesson}
+          lesson={currentDoc}
           highlightExcerpt={inspectExcerpt}
         />
       )}

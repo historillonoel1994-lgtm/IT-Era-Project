@@ -26,6 +26,11 @@ import { UserProfile, LessonDocument, QuizResult, StudentProgress } from '../typ
 import { DEFAULT_LESSONS } from '../data/defaultLessons';
 import { SAMPLE_EXAM_TAKES } from '../data/precomputedData';
 import {
+  loadAndReconstructLesson,
+  isPlaceholderContent,
+  getDocumentFullContent,
+} from '../services/storage';
+import {
   supabase,
   STORAGE_BUCKET,
   checkIsConfigured,
@@ -346,28 +351,58 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
     setTestResult(res.message);
   };
 
-  // Helper to load a material into the app
-  const handleMaterialClick = (mat: SupabaseMaterialRow) => {
+  const [loadingMaterialId, setLoadingMaterialId] = useState<string | null>(null);
+
+  // Helper to load a material into the app with complete extracted content
+  const handleMaterialClick = async (mat: SupabaseMaterialRow) => {
     setCurrentLearningMaterialId(mat.id);
-    const ext = (mat.file_name?.split('.').pop() || 'pdf').toLowerCase();
-    const doc: LessonDocument = {
-      id: mat.id,
-      title: mat.title || mat.file_name || 'Learning Material',
-      subject: 'Saved Course Material',
-      totalPages: mat.total_pages || 1,
-      uploadedAt: mat.created_at || new Date().toISOString(),
-      fileName: mat.file_name,
-      filePath: mat.file_path,
-      fileType: ext,
-      pages: [
-        {
-          pageNumber: 1,
-          text: `[Document: ${mat.title || mat.file_name}]\nStored path: ${mat.file_path || 'saved in study-buddy-materials'}.\nReady for AI summarization and quiz generation.`,
-        },
-      ],
-      isSample: false,
-    };
-    onSelectLesson(doc);
+    setLoadingMaterialId(mat.id);
+
+    try {
+      // 1. Look for matching lesson in current library with complete pages
+      const existing = lessons.find(
+        (l) => l.id === mat.id || (l.fileName && mat.file_name && l.fileName === mat.file_name)
+      );
+      if (existing && !isPlaceholderContent(existing.pages)) {
+        onSelectLesson(existing);
+        setLoadingMaterialId(null);
+        return;
+      }
+
+      // 2. Load and reconstruct complete document context from backend/database/storage
+      const reconstructed = await loadAndReconstructLesson({
+        id: mat.id,
+        title: mat.title,
+        fileName: mat.file_name,
+        filePath: mat.file_path,
+        totalPages: mat.total_pages || 1,
+      });
+      onSelectLesson(reconstructed);
+    } catch (err: any) {
+      console.warn('Could not reconstruct material:', err.message);
+      const ext = (mat.file_name?.split('.').pop() || 'pdf').toLowerCase();
+      onSelectLesson({
+        id: mat.id,
+        title: mat.title || mat.file_name || 'Learning Material',
+        subject: 'Saved Course Material',
+        totalPages: mat.total_pages || 1,
+        uploadedAt: mat.created_at || new Date().toISOString(),
+        fileName: mat.file_name,
+        filePath: mat.file_path,
+        fileType: ext,
+        pages: [
+          {
+            pageNumber: 1,
+            text: `[Document: ${mat.title || mat.file_name}]\nStored path: ${mat.file_path || 'saved in cloud vault'}.`,
+          },
+        ],
+        isSample: false,
+        processingStatus: 'reprocessing_required',
+        statusMessage: 'This learning material needs to be processed again to access its complete content.',
+      });
+    } finally {
+      setLoadingMaterialId(null);
+    }
   };
 
   return (
@@ -771,9 +806,16 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
                         <span className="text-[11px] text-slate-600">
                           {mat.created_at ? new Date(mat.created_at).toLocaleDateString() : 'Saved in cloud'}
                         </span>
-                        <span className="text-sky-700 font-semibold hover:underline">
-                          Load Lesson →
-                        </span>
+                        {loadingMaterialId === mat.id ? (
+                          <span className="text-sky-700 font-bold flex items-center space-x-1">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>Loading Full Content...</span>
+                          </span>
+                        ) : (
+                          <span className="text-sky-700 font-semibold hover:underline">
+                            Load Full Lesson →
+                          </span>
+                        )}
                       </div>
                     </div>
                   );

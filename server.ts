@@ -1,23 +1,174 @@
 import express, { type Request, type Response } from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 import * as xlsx from 'xlsx';
 import JSZip from 'jszip';
+import QRCode from 'qrcode';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const DATA_DIR = path.join(__dirname, '.data');
+const DOCS_STORE_FILE = path.join(DATA_DIR, 'documents_store.json');
+
+interface StoredDocRecord {
+  id: string;
+  title: string;
+  filename: string;
+  filePath?: string;
+  fileType: string;
+  totalPages: number;
+  pages: { pageNumber: number | string; text: string; sectionTitle?: string }[];
+  chunks: { chunkId: string; pageNumber: number | string; text: string; keywords?: string[]; charCount?: number }[];
+  processingStatus: 'ready' | 'processing' | 'processing_failed' | 'reprocessing_required';
+  statusMessage?: string;
+  fullTextLength: number;
+  uploadedAt: string;
+  updatedAt: string;
+}
+
+function loadDocumentsStore(): Record<string, StoredDocRecord> {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (fs.existsSync(DOCS_STORE_FILE)) {
+      const raw = fs.readFileSync(DOCS_STORE_FILE, 'utf-8');
+      return JSON.parse(raw);
+    }
+  } catch (err) {
+    console.error('Failed to load documents store:', err);
+  }
+  return {};
+}
+
+function saveDocumentsStore(store: Record<string, StoredDocRecord>): void {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(DOCS_STORE_FILE, JSON.stringify(store, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Failed to save documents store:', err);
+  }
+}
+
+function saveDocumentToStore(doc: Partial<StoredDocRecord> & { id: string }): StoredDocRecord {
+  const store = loadDocumentsStore();
+  const existing = store[doc.id] || {};
+  const resolvedPages = doc.pages || existing.pages || [];
+  const record: StoredDocRecord = {
+    id: doc.id,
+    title: doc.title || existing.title || doc.filename || 'Untitled Material',
+    filename: doc.filename || existing.filename || 'document',
+    filePath: doc.filePath || existing.filePath,
+    fileType: doc.fileType || existing.fileType || 'pdf',
+    totalPages: doc.totalPages || resolvedPages.length || existing.totalPages || 1,
+    pages: resolvedPages,
+    chunks: doc.chunks || existing.chunks || [],
+    processingStatus: doc.processingStatus || (isPlaceholderContent(resolvedPages) ? 'reprocessing_required' : 'ready'),
+    statusMessage: doc.statusMessage || 'Document is ready for study and analysis.',
+    fullTextLength: doc.fullTextLength || resolvedPages.reduce((acc, p) => acc + (p.text?.length || 0), 0),
+    uploadedAt: existing.uploadedAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  store[doc.id] = record;
+  if (record.filename) {
+    const fileKey = `file:${record.filename.toLowerCase()}`;
+    if (!isPlaceholderContent(record.pages) || !store[fileKey] || isPlaceholderContent(store[fileKey].pages)) {
+      store[fileKey] = record;
+    }
+  }
+  if (record.filePath) {
+    const pathKey = `path:${record.filePath}`;
+    if (!isPlaceholderContent(record.pages) || !store[pathKey] || isPlaceholderContent(store[pathKey].pages)) {
+      store[pathKey] = record;
+    }
+  }
+  saveDocumentsStore(store);
+  return record;
+}
+
+function isPlaceholderContent(pages?: { text?: string }[]): boolean {
+  if (!pages || pages.length === 0) return true;
+  if (pages.length === 1) {
+    const text = (pages[0].text || '').trim().toLowerCase();
+    if (!text) return true;
+    if (text.startsWith('[document:') && text.includes('stored path:')) return true;
+    if (
+      text.includes('could not be completely extracted') ||
+      text.includes('no readable text content found') ||
+      text.includes('no readable text extracted') ||
+      text.includes('no text extracted from') ||
+      text.includes('contains no readable rows')
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function getDocumentFromStore(key: string): StoredDocRecord | null {
+  if (!key) return null;
+  const store = loadDocumentsStore();
+  const cleanKey = String(key).trim();
+  if (!cleanKey) return null;
+  const cleanKeyLow = cleanKey.toLowerCase();
+  const strippedKey = cleanKeyLow.replace(/\.[a-z0-9]+$/i, '');
+
+  if (store[cleanKey]) return store[cleanKey];
+  if (store[`path:${cleanKey}`]) return store[`path:${cleanKey}`];
+  if (store[`file:${cleanKeyLow}`]) return store[`file:${cleanKeyLow}`];
+
+  const values = Object.values(store);
+
+  // Exact ID / filePath / filename / title matches (ID & filePath first)
+  let match =
+    values.find((d) => d.id === cleanKey) ||
+    values.find((d) => d.filePath && d.filePath === cleanKey) ||
+    values.find((d) => d.filename && d.filename.toLowerCase() === cleanKeyLow) ||
+    values.find((d) => d.title && d.title.toLowerCase() === cleanKeyLow);
+
+  // Extension-stripped filename or safe partial match (only for meaningful lengths >= 4)
+  if (!match && strippedKey.length >= 4) {
+    match = values.find((d) => {
+      const fNameLow = (d.filename || '').toLowerCase();
+      const fStripped = fNameLow.replace(/\.[a-z0-9]+$/i, '');
+      const tLow = (d.title || '').toLowerCase();
+      if (fStripped && fStripped === strippedKey) return true;
+      if (tLow && tLow.length >= 4 && cleanKeyLow.length >= 4) {
+        return tLow === cleanKeyLow || tLow.includes(cleanKeyLow) || cleanKeyLow.includes(tLow);
+      }
+      return false;
+    });
+  }
+
+  return match || null;
+}
+
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Return clean JSON error if request payload exceeds Express 50MB limit
+app.use((err: any, _req: Request, res: Response, next: express.NextFunction) => {
+  if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+    return res.status(413).json({
+      error: 'The uploaded file payload exceeds the 50MB transfer limit. Please upload a smaller or compressed file (under 35MB).',
+    });
+  }
+  return next(err);
+});
 
 // Shared Gemini AI Client Utility
 const ai = new GoogleGenAI({
@@ -29,10 +180,9 @@ const ai = new GoogleGenAI({
   },
 });
 
-const PRIMARY_MODEL = 'gemini-3.8-flash';
+const PRIMARY_MODEL = 'gemini-4-hydrogen';
 const CANDIDATE_MODELS = [
-  'gemini-3.8-flash',
-  'gemini-flash-latest',
+  'gemini-4-hydrogen',
   'gemini-3.1-flash-lite',
 ];
 
@@ -53,37 +203,58 @@ function cleanJsonString(str: string): string {
   return cleaned;
 }
 
-// Call Gemini with automatic retry on 503/429, ThinkingLevel.LOW latency optimization, and candidate model fallback
+// Call Gemini with automatic retry on 503/429, per-request timeout, ThinkingLevel.LOW latency optimization, and candidate model fallback
 async function generateContentWithRetry(options: {
   contents: any;
   config?: any;
   preferredModel?: string;
+  timeoutMs?: number;
 }): Promise<any> {
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY is not configured on the server.');
+  }
+
   const preferred = options.preferredModel || PRIMARY_MODEL;
   const modelsToTry = [
     preferred,
     ...CANDIDATE_MODELS.filter((m) => m !== preferred),
   ];
+  const perAttemptTimeoutMs = options.timeoutMs || 18000;
 
   let lastError: any = null;
 
   for (const model of modelsToTry) {
-    // Only Gemini 3 models support thinkingConfig
-    const isGemini3 = model.startsWith('gemini-3');
+    const supportsThinkingLevel = model.startsWith('gemini-4') || model.startsWith('gemini-3');
+    const isFlashLite = model === 'gemini-3.1-flash-lite';
     const baseConfig = { ...(options.config || {}) };
-    if (isGemini3 && !baseConfig.thinkingConfig) {
+    if (supportsThinkingLevel && !isFlashLite && !baseConfig.thinkingConfig) {
       baseConfig.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
-    } else if (!isGemini3) {
+    } else if (!supportsThinkingLevel || isFlashLite) {
       delete baseConfig.thinkingConfig;
     }
 
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const response = await ai.models.generateContent({
+        const generatePromise = ai.models.generateContent({
           model,
           contents: options.contents,
           config: baseConfig,
         });
+
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<never>((_resolve, reject) => {
+          timeoutHandle = setTimeout(
+            () => reject(new Error(`Gemini request timeout after ${perAttemptTimeoutMs}ms for model ${model}`)),
+            perAttemptTimeoutMs
+          );
+        });
+
+        let response: any;
+        try {
+          response = await Promise.race([generatePromise, timeoutPromise]);
+        } finally {
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+        }
 
         if (response && response.text) {
           return response;
@@ -103,8 +274,7 @@ async function generateContentWithRetry(options: {
           msg.includes('fetch failed');
 
         if (isTransient && attempt === 0) {
-          // Wait briefly with jitter before retry
-          await new Promise((resolve) => setTimeout(resolve, 800 + Math.random() * 400));
+          await new Promise((resolve) => setTimeout(resolve, 600 + Math.random() * 300));
           continue;
         }
         break;
@@ -112,7 +282,7 @@ async function generateContentWithRetry(options: {
     }
   }
 
-  throw lastError;
+  throw lastError || new Error('All Gemini model candidates failed to return content.');
 }
 
 // In-memory document chunk and metadata cache
@@ -439,170 +609,236 @@ function chunkTextIntoPages(
     : [{ pageNumber: 1, text: rawText.trim() || 'No readable text content found.' }];
 }
 
+// Shared multi-format extraction helper (supports PDF + Gemini scanned PDF OCR fallback, DOCX/DOC, PPTX/PPT, XLSX/CSV, TXT/MD)
+async function extractDocumentPagesFromBuffer(
+  dataBuffer: Buffer,
+  safeFilename: string
+): Promise<{ finalPages: { pageNumber: number; text: string }[]; detectedType: string }> {
+  const ext = (safeFilename.split('.').pop() || '').toLowerCase();
+  let finalPages: { pageNumber: number; text: string }[] = [];
+  let detectedType = ext || 'document';
+
+  // 1. PDF Documents (.pdf)
+  if (ext === 'pdf') {
+    detectedType = 'pdf';
+    let parser: PDFParse | null = null;
+    try {
+      parser = new PDFParse({ data: dataBuffer });
+      const textResult = await parser.getText();
+      const rawPages = (textResult.pages || []).map((p, idx) => ({
+        pageNumber: p.num || idx + 1,
+        text: (p.text || '').trim(),
+      }));
+
+      const validPages = rawPages.filter((p) => p.text.length > 0);
+      if (validPages.length > 0) {
+        finalPages = rawPages.map((p) => ({
+          pageNumber: p.pageNumber,
+          text: p.text.length > 0 ? p.text : `[Page ${p.pageNumber} contains diagrams or visual illustrations]`,
+        }));
+      } else if (textResult.text && textResult.text.trim().length > 0) {
+        finalPages = chunkTextIntoPages(textResult.text.trim(), 'Page', 1200);
+      }
+    } catch (pdfErr: any) {
+      console.warn('pdf-parse warning, attempting OCR fallback if applicable:', pdfErr?.message);
+    } finally {
+      if (parser) {
+        try { await parser.destroy(); } catch (e) {}
+      }
+    }
+
+    // Fallback for scanned / image-based PDFs via Gemini Multimodal document understanding
+    if ((finalPages.length === 0 || isPlaceholderContent(finalPages)) && process.env.GEMINI_API_KEY && dataBuffer.length <= 20 * 1024 * 1024) {
+      try {
+        const ocrResponse = await generateContentWithRetry({
+          preferredModel: PRIMARY_MODEL,
+          timeoutMs: 25000,
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: 'application/pdf',
+                  data: dataBuffer.toString('base64'),
+                },
+              },
+              {
+                text: 'Extract all readable educational text, headings, definitions, and content from every page of this PDF accurately in JSON format. Preserve page order.',
+              },
+            ],
+          },
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                pages: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      pageNumber: { type: Type.INTEGER },
+                      text: { type: Type.STRING },
+                    },
+                    required: ['pageNumber', 'text'],
+                  },
+                },
+              },
+              required: ['pages'],
+            },
+          },
+        });
+        const ocrParsed = JSON.parse(cleanJsonString(ocrResponse.text || '{"pages":[]}'));
+        const ocrPages = (ocrParsed.pages || [])
+          .filter((p: any) => p && typeof p.text === 'string' && p.text.trim().length > 0)
+          .map((p: any, idx: number) => ({
+            pageNumber: Number(p.pageNumber) || idx + 1,
+            text: p.text.trim(),
+          }));
+        if (ocrPages.length > 0) {
+          finalPages = ocrPages;
+        }
+      } catch (ocrErr: any) {
+        console.warn('Gemini PDF OCR fallback failed:', ocrErr?.message);
+      }
+    }
+
+    if (finalPages.length === 0) {
+      finalPages = [{ pageNumber: 1, text: 'No readable text extracted from document.' }];
+    }
+  }
+  // 2. Microsoft Word Documents (.docx, .doc)
+  else if (ext === 'docx' || ext === 'doc') {
+    detectedType = 'docx';
+    try {
+      const docxResult = await mammoth.extractRawText({ buffer: dataBuffer });
+      const text = docxResult.value || '';
+      finalPages = chunkTextIntoPages(text, 'Page', 1200);
+    } catch (docErr: any) {
+      const rawText = dataBuffer.toString('utf-8').replace(/[^\x20-\x7E\n\r\t]/g, ' ');
+      if (rawText.replace(/\s+/g, '').length > 100) {
+        finalPages = chunkTextIntoPages(rawText, 'Section', 1200);
+      } else {
+        throw new Error(`Could not parse Word document: ${docErr.message}`);
+      }
+    }
+  }
+  // 3. PowerPoint Presentations (.pptx, .ppt)
+  else if (ext === 'pptx' || ext === 'ppt') {
+    detectedType = 'pptx';
+    try {
+      const zip = await JSZip.loadAsync(dataBuffer);
+      const slideFiles = Object.keys(zip.files).filter((name) =>
+        /^ppt\/slides\/slide\d+\.xml$/i.test(name)
+      );
+
+      slideFiles.sort((a, b) => {
+        const numA = parseInt(a.match(/slide(\d+)\.xml/i)?.[1] || '0', 10);
+        const numB = parseInt(b.match(/slide(\d+)\.xml/i)?.[1] || '0', 10);
+        return numA - numB;
+      });
+
+      const pages: { pageNumber: number; text: string }[] = [];
+      for (let i = 0; i < slideFiles.length; i++) {
+        const slideFileName = slideFiles[i];
+        const slideXml = await zip.files[slideFileName].async('text');
+        const slideNum = i + 1;
+
+        const textMatches = slideXml.match(/<a:t[^>]*>([\s\S]*?)<\/a:t>/gi) || [];
+        const slideTexts = textMatches
+          .map((m) => decodeXmlEntities(m.replace(/<[^>]+>/g, '')).trim())
+          .filter((t) => t.length > 0);
+
+        let notesText = '';
+        const noteFileName = `ppt/notesSlides/notesSlide${slideNum}.xml`;
+        if (zip.files[noteFileName]) {
+          const noteXml = await zip.files[noteFileName].async('text');
+          const noteMatches = noteXml.match(/<a:t[^>]*>([\s\S]*?)<\/a:t>/gi) || [];
+          notesText = noteMatches
+            .map((m) => decodeXmlEntities(m.replace(/<[^>]+>/g, '')).trim())
+            .filter((t) => t.length > 0)
+            .join(' ');
+        }
+
+        const slideContent = [
+          `[Slide ${slideNum}]`,
+          slideTexts.join('\n'),
+          notesText ? `\n(Presenter Notes: ${notesText})` : '',
+        ].filter(Boolean).join('\n');
+
+        pages.push({
+          pageNumber: slideNum,
+          text: slideContent.trim().length > 0
+            ? slideContent.trim()
+            : `[Slide ${slideNum} - Diagrams, charts, or visual slide]`,
+        });
+      }
+
+      finalPages = pages.length > 0 ? pages : [{ pageNumber: 1, text: 'No text extracted from presentation slides.' }];
+    } catch (pptErr: any) {
+      throw new Error(`Failed to parse presentation: ${pptErr.message}`);
+    }
+  }
+  // 4. Spreadsheets & CSV (.xlsx, .xls, .csv, .tsv)
+  else if (ext === 'xlsx' || ext === 'xls' || ext === 'csv' || ext === 'tsv') {
+    detectedType = ext === 'csv' || ext === 'tsv' ? 'csv' : 'xlsx';
+    try {
+      const workbook = xlsx.read(dataBuffer, { type: 'buffer' });
+      const pages: { pageNumber: number; text: string }[] = [];
+      let pageNum = 1;
+
+      for (const sheetName of workbook.SheetNames) {
+        const worksheet = workbook.Sheets[sheetName];
+        const csvText = xlsx.utils.sheet_to_csv(worksheet);
+        if (!csvText || !csvText.trim()) continue;
+
+        const rows = csvText.split('\n').filter((r) => r.trim().length > 0);
+        if (rows.length === 0) continue;
+
+        const CHUNK_SIZE = 30;
+        for (let r = 0; r < rows.length; r += CHUNK_SIZE) {
+          const chunkRows = rows.slice(r, r + CHUNK_SIZE);
+          const startRow = r + 1;
+          const endRow = Math.min(r + CHUNK_SIZE, rows.length);
+          const rowLabel = rows.length > CHUNK_SIZE ? ` (Rows ${startRow}-${endRow} of ${rows.length})` : '';
+          pages.push({
+            pageNumber: pageNum++,
+            text: `Spreadsheet Sheet: "${sheetName}"${rowLabel}\n\n${chunkRows.join('\n')}`,
+          });
+        }
+      }
+
+      finalPages = pages.length > 0 ? pages : [{ pageNumber: 1, text: 'Spreadsheet contains no readable rows.' }];
+    } catch (sheetErr: any) {
+      throw new Error(`Failed to parse spreadsheet: ${sheetErr.message}`);
+    }
+  }
+  // 5. Plain text, Markdown, RTF, JSON, Code files (.txt, .md, .rtf, .json, etc.)
+  else {
+    detectedType = ext || 'txt';
+    const text = dataBuffer.toString('utf-8');
+    finalPages = chunkTextIntoPages(text, 'Section', 1200);
+  }
+
+  return { finalPages, detectedType };
+}
+
 // 1. Multi-format Document Parser Endpoint (PDF, DOCX/DOC, PPTX/PPT, XLSX/CSV, TXT/MD)
 app.post(['/api/parse-document', '/api/parse-pdf'], async (req: Request, res: Response) => {
-  const { fileBase64, pdfBase64, filename, fileType } = req.body;
+  const { fileBase64, pdfBase64, filename } = req.body;
   const rawBase64 = fileBase64 || pdfBase64;
-  if (!rawBase64) {
+  if (!rawBase64 || typeof rawBase64 !== 'string') {
     return res.status(400).json({ error: 'No document data provided' });
   }
 
   const safeFilename = filename || 'Uploaded_Document';
   const cleanBase64 = rawBase64.replace(/^data:[^;]+;base64,/, '');
   const dataBuffer = Buffer.from(cleanBase64, 'base64');
-  const ext = (safeFilename.split('.').pop() || '').toLowerCase();
-
-  let finalPages: { pageNumber: number; text: string }[] = [];
-  let detectedType = ext || 'document';
 
   try {
-    // 1. PDF Documents (.pdf)
-    if (ext === 'pdf') {
-      detectedType = 'pdf';
-      let parser: PDFParse | null = null;
-      try {
-        parser = new PDFParse({ data: dataBuffer });
-        const textResult = await parser.getText();
-        const rawPages = (textResult.pages || []).map((p, idx) => ({
-          pageNumber: p.num || idx + 1,
-          text: (p.text || '').trim(),
-        }));
+    const { finalPages, detectedType } = await extractDocumentPagesFromBuffer(dataBuffer, safeFilename);
+    const hasReadableText = !isPlaceholderContent(finalPages);
+    const statusValue: StoredDocRecord['processingStatus'] = hasReadableText ? 'ready' : 'processing_failed';
 
-        // Filter and ensure valid text content
-        const validPages = rawPages.filter((p) => p.text.length > 0);
-        if (validPages.length > 0) {
-          finalPages = rawPages.map((p) => ({
-            pageNumber: p.pageNumber,
-            text: p.text.length > 0 ? p.text : `[Page ${p.pageNumber} contains diagrams or visual illustrations]`,
-          }));
-        } else if (textResult.text && textResult.text.trim().length > 0) {
-          finalPages = chunkTextIntoPages(textResult.text.trim(), 'Page', 1200);
-        } else {
-          finalPages = [{ pageNumber: 1, text: 'No readable text extracted from document.' }];
-        }
-      } finally {
-        if (parser) {
-          try { await parser.destroy(); } catch (e) {}
-        }
-      }
-    }
-    // 2. Microsoft Word Documents (.docx, .doc)
-    else if (ext === 'docx' || ext === 'doc') {
-      detectedType = 'docx';
-      try {
-        const docxResult = await mammoth.extractRawText({ buffer: dataBuffer });
-        const text = docxResult.value || '';
-        finalPages = chunkTextIntoPages(text, 'Page', 1200);
-      } catch (docErr: any) {
-        // Fallback for older .doc binary format
-        const rawText = dataBuffer.toString('utf-8').replace(/[^\x20-\x7E\n\r\t]/g, ' ');
-        if (rawText.replace(/\s+/g, '').length > 100) {
-          finalPages = chunkTextIntoPages(rawText, 'Section', 1200);
-        } else {
-          throw new Error(`Could not parse Word document: ${docErr.message}`);
-        }
-      }
-    }
-    // 3. PowerPoint Presentations (.pptx, .ppt)
-    else if (ext === 'pptx' || ext === 'ppt') {
-      detectedType = 'pptx';
-      try {
-        const zip = await JSZip.loadAsync(dataBuffer);
-        const slideFiles = Object.keys(zip.files).filter((name) =>
-          /^ppt\/slides\/slide\d+\.xml$/i.test(name)
-        );
-
-        slideFiles.sort((a, b) => {
-          const numA = parseInt(a.match(/slide(\d+)\.xml/i)?.[1] || '0', 10);
-          const numB = parseInt(b.match(/slide(\d+)\.xml/i)?.[1] || '0', 10);
-          return numA - numB;
-        });
-
-        const pages: { pageNumber: number; text: string }[] = [];
-        for (let i = 0; i < slideFiles.length; i++) {
-          const slideFileName = slideFiles[i];
-          const slideXml = await zip.files[slideFileName].async('text');
-          const slideNum = i + 1;
-
-          // Extract slide texts from OpenXML tags
-          const textMatches = slideXml.match(/<a:t[^>]*>([\s\S]*?)<\/a:t>/gi) || [];
-          const slideTexts = textMatches
-            .map((m) => decodeXmlEntities(m.replace(/<[^>]+>/g, '')).trim())
-            .filter((t) => t.length > 0);
-
-          // Check for presenter notes
-          let notesText = '';
-          const noteFileName = `ppt/notesSlides/notesSlide${slideNum}.xml`;
-          if (zip.files[noteFileName]) {
-            const noteXml = await zip.files[noteFileName].async('text');
-            const noteMatches = noteXml.match(/<a:t[^>]*>([\s\S]*?)<\/a:t>/gi) || [];
-            notesText = noteMatches
-              .map((m) => decodeXmlEntities(m.replace(/<[^>]+>/g, '')).trim())
-              .filter((t) => t.length > 0)
-              .join(' ');
-          }
-
-          const slideContent = [
-            `[Slide ${slideNum}]`,
-            slideTexts.join('\n'),
-            notesText ? `\n(Presenter Notes: ${notesText})` : '',
-          ].filter(Boolean).join('\n');
-
-          pages.push({
-            pageNumber: slideNum,
-            text: slideContent.trim().length > 0
-              ? slideContent.trim()
-              : `[Slide ${slideNum} - Diagrams, charts, or visual slide]`,
-          });
-        }
-
-        finalPages = pages.length > 0 ? pages : [{ pageNumber: 1, text: 'No text extracted from presentation slides.' }];
-      } catch (pptErr: any) {
-        throw new Error(`Failed to parse presentation: ${pptErr.message}`);
-      }
-    }
-    // 4. Spreadsheets & CSV (.xlsx, .xls, .csv, .tsv)
-    else if (ext === 'xlsx' || ext === 'xls' || ext === 'csv' || ext === 'tsv') {
-      detectedType = ext === 'csv' || ext === 'tsv' ? 'csv' : 'xlsx';
-      try {
-        const workbook = xlsx.read(dataBuffer, { type: 'buffer' });
-        const pages: { pageNumber: number; text: string }[] = [];
-        let pageNum = 1;
-
-        for (const sheetName of workbook.SheetNames) {
-          const worksheet = workbook.Sheets[sheetName];
-          const csvText = xlsx.utils.sheet_to_csv(worksheet);
-          if (!csvText || !csvText.trim()) continue;
-
-          const rows = csvText.split('\n').filter((r) => r.trim().length > 0);
-          if (rows.length === 0) continue;
-
-          const CHUNK_SIZE = 30;
-          for (let r = 0; r < rows.length; r += CHUNK_SIZE) {
-            const chunkRows = rows.slice(r, r + CHUNK_SIZE);
-            const startRow = r + 1;
-            const endRow = Math.min(r + CHUNK_SIZE, rows.length);
-            const rowLabel = rows.length > CHUNK_SIZE ? ` (Rows ${startRow}-${endRow} of ${rows.length})` : '';
-            pages.push({
-              pageNumber: pageNum++,
-              text: `Spreadsheet Sheet: "${sheetName}"${rowLabel}\n\n${chunkRows.join('\n')}`,
-            });
-          }
-        }
-
-        finalPages = pages.length > 0 ? pages : [{ pageNumber: 1, text: 'Spreadsheet contains no readable rows.' }];
-      } catch (sheetErr: any) {
-        throw new Error(`Failed to parse spreadsheet: ${sheetErr.message}`);
-      }
-    }
-    // 5. Plain text, Markdown, RTF, JSON, Code files (.txt, .md, .rtf, .json, etc.)
-    else {
-      detectedType = ext || 'txt';
-      const text = dataBuffer.toString('utf-8');
-      finalPages = chunkTextIntoPages(text, 'Section', 1200);
-    }
-
-    // Generate structured chunks with metadata
     const chunks = finalPages.map((p, idx) => ({
       chunkId: `chunk-${idx + 1}`,
       pageNumber: p.pageNumber,
@@ -613,25 +849,52 @@ app.post(['/api/parse-document', '/api/parse-pdf'], async (req: Request, res: Re
 
     const fullTextLength = finalPages.reduce((sum, p) => sum + p.text.length, 0);
 
-    // Save into server memory cache
-    parsedDocumentCache.set(safeFilename, {
+    if (hasReadableText) {
+      parsedDocumentCache.set(safeFilename, {
+        filename: safeFilename,
+        fileType: detectedType,
+        totalPages: finalPages.length,
+        pages: finalPages,
+        chunks,
+        fullTextLength,
+        uploadedAt: new Date().toISOString(),
+      });
+    }
+
+    const docId = (req.body?.documentId as string) || (req.body?.id as string) || `doc-${Date.now()}`;
+    const storedRecord = saveDocumentToStore({
+      id: docId,
+      title: (req.body?.title as string) || (req.body?.lessonTitle as string) || safeFilename,
       filename: safeFilename,
+      filePath: req.body?.filePath as string,
       fileType: detectedType,
       totalPages: finalPages.length,
       pages: finalPages,
       chunks,
+      processingStatus: statusValue,
+      statusMessage: hasReadableText
+        ? 'Document extracted and ready for study.'
+        : 'No readable text could be extracted from this file. It may be a scanned image without selectable text.',
       fullTextLength,
-      uploadedAt: new Date().toISOString(),
     });
+
+    if (!hasReadableText) {
+      return res.status(422).json({
+        error: `No readable text could be extracted from ${safeFilename}. Please verify the file contains selectable text or try a different format.`,
+        processingStatus: 'processing_failed',
+      });
+    }
 
     res.json({
       success: true,
+      documentId: storedRecord.id,
       totalPages: finalPages.length,
       pages: finalPages,
       chunks,
       fullTextLength,
       filename: safeFilename,
       fileType: detectedType,
+      processingStatus: 'ready',
     });
   } catch (error: any) {
     console.error('Error parsing document:', error);
@@ -640,6 +903,116 @@ app.post(['/api/parse-document', '/api/parse-pdf'], async (req: Request, res: Re
       details: error.message,
     });
   }
+});
+
+// Endpoint: Store or update complete extracted document content
+app.post('/api/documents/store', (req: Request, res: Response) => {
+  const { id, documentId, title, filename, filePath, fileType, totalPages, pages, chunks, processingStatus, statusMessage } = req.body;
+  const targetId = id || documentId;
+  if (!targetId) {
+    return res.status(400).json({ error: 'Document ID is required.' });
+  }
+
+  const record = saveDocumentToStore({
+    id: targetId,
+    title,
+    filename,
+    filePath,
+    fileType,
+    totalPages,
+    pages,
+    chunks,
+    processingStatus: processingStatus || 'ready',
+    statusMessage,
+  });
+
+  return res.json({ success: true, document: record });
+});
+
+// Endpoint: Retrieve complete extracted document content by ID, filename, or storage path
+app.get('/api/documents/:id', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const doc = getDocumentFromStore(id);
+  if (!doc || isPlaceholderContent(doc.pages)) {
+    return res.status(404).json({
+      error: 'Document complete content not found on server.',
+      processingStatus: 'reprocessing_required',
+      message: 'This learning material needs to be processed again to access its complete content.',
+    });
+  }
+
+  return res.json({
+    success: true,
+    document: {
+      ...doc,
+      processingStatus: 'ready',
+    },
+  });
+});
+
+// Endpoint: Reprocess document content
+app.post('/api/documents/:id/reprocess', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { fileBase64, filename, filePath, title } = req.body;
+
+  if (fileBase64 && typeof fileBase64 === 'string') {
+    try {
+      const safeFilename = filename || id || 'Uploaded_Document';
+      const cleanBase64 = fileBase64.replace(/^data:[^;]+;base64,/, '');
+      const dataBuffer = Buffer.from(cleanBase64, 'base64');
+
+      const { finalPages, detectedType } = await extractDocumentPagesFromBuffer(dataBuffer, safeFilename);
+
+      if (finalPages.length > 0 && !isPlaceholderContent(finalPages)) {
+        const chunks = finalPages.map((p, idx) => ({
+          chunkId: `chunk-${idx + 1}`,
+          pageNumber: p.pageNumber,
+          text: p.text,
+          keywords: extractTopKeywords(p.text, 8),
+          charCount: p.text.length,
+        }));
+
+        const record = saveDocumentToStore({
+          id,
+          title: title || safeFilename,
+          filename: safeFilename,
+          filePath,
+          fileType: detectedType,
+          totalPages: finalPages.length,
+          pages: finalPages,
+          chunks,
+          processingStatus: 'ready',
+          statusMessage: 'Document reprocessed successfully.',
+        });
+
+        return res.json({ success: true, document: record, message: 'Document reprocessed successfully.' });
+      }
+      return res.status(422).json({
+        error: `No readable text could be extracted while reprocessing ${safeFilename}.`,
+        processingStatus: 'processing_failed',
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: `Reprocessing failed: ${err.message}` });
+    }
+  }
+
+  // Check if we already have valid extracted content in the persistent store
+  const existing = getDocumentFromStore(id) || (filename ? getDocumentFromStore(filename) : null);
+  if (existing && !isPlaceholderContent(existing.pages)) {
+    const updated = saveDocumentToStore({
+      ...existing,
+      id,
+      processingStatus: 'ready',
+      statusMessage: 'Document content verified and ready.',
+    });
+    return res.json({ success: true, document: updated, message: 'Document content verified and ready.' });
+  }
+
+  return res.status(404).json({
+    error: 'Original document content not found for automatic reprocessing.',
+    processingStatus: 'reprocessing_required',
+    message: 'This learning material needs to be processed again to access its complete content.',
+  });
 });
 
 // 2. FEATURE 1: Summarize Lesson
@@ -1016,10 +1389,25 @@ function extractQuizQuestionsFromPages(
 }
 
 app.post('/api/summarize', async (req: Request, res: Response) => {
-  const { pages, lessonTitle, subject } = req.body;
+  let { pages, lessonTitle, subject, id, documentId, lessonId, filename } = req.body;
   try {
-    if (!pages || !Array.isArray(pages) || pages.length === 0) {
-      return res.status(400).json({ error: 'Please provide lesson pages to summarize' });
+    // If pages are missing or placeholder, attempt automatic reconstruction from server store
+    if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
+      const lookupKey = id || documentId || lessonId || filename || lessonTitle;
+      if (lookupKey) {
+        const stored = getDocumentFromStore(lookupKey);
+        if (stored && stored.pages && !isPlaceholderContent(stored.pages)) {
+          pages = stored.pages;
+          if (!lessonTitle) lessonTitle = stored.title;
+        }
+      }
+    }
+
+    if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
+      return res.status(400).json({
+        error: 'This learning material needs to be processed again to access its complete content.',
+        processingStatus: 'reprocessing_required',
+      });
     }
 
     const lessonContext = formatLessonContext(pages);
@@ -1212,11 +1600,26 @@ Generate the summary in JSON according to the schema.`;
 
 // 3. FEATURE 2: Generate Quiz
 app.post('/api/quiz', async (req: Request, res: Response) => {
-  const { pages, lessonTitle, questionCount = 5, quizType = 'mixed' } = req.body;
+  let { pages, lessonTitle, questionCount = 5, quizType = 'mixed', id, documentId, lessonId, filename } = req.body;
   const count = [5, 10, 15].includes(Number(questionCount)) ? Number(questionCount) : 5;
   try {
-    if (!pages || !Array.isArray(pages) || pages.length === 0) {
-      return res.status(400).json({ error: 'Please provide lesson pages to generate a quiz' });
+    // If pages are missing or placeholder, attempt automatic reconstruction from server store
+    if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
+      const lookupKey = id || documentId || lessonId || filename || lessonTitle;
+      if (lookupKey) {
+        const stored = getDocumentFromStore(lookupKey);
+        if (stored && stored.pages && !isPlaceholderContent(stored.pages)) {
+          pages = stored.pages;
+          if (!lessonTitle) lessonTitle = stored.title;
+        }
+      }
+    }
+
+    if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
+      return res.status(400).json({
+        error: 'This learning material needs to be processed again to access its complete content.',
+        processingStatus: 'reprocessing_required',
+      });
     }
 
     const lessonContext = formatLessonContext(pages);
@@ -1409,9 +1812,23 @@ Keep the total explanation under 65 words. Be direct, approachable, and accurate
 
 // 3.2 Analyze Document Chapters and Major Sections
 app.post('/api/analyze-chapters', async (req: Request, res: Response) => {
-  const { pages, lessonTitle } = req.body;
-  if (!pages || !Array.isArray(pages) || pages.length === 0) {
-    return res.status(400).json({ error: 'Please provide lesson pages to analyze' });
+  let { pages, lessonTitle, id, documentId, lessonId, filename } = req.body;
+  if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
+    const lookupKey = id || documentId || lessonId || filename || lessonTitle;
+    if (lookupKey) {
+      const stored = getDocumentFromStore(lookupKey);
+      if (stored && stored.pages && !isPlaceholderContent(stored.pages)) {
+        pages = stored.pages;
+        if (!lessonTitle) lessonTitle = stored.title;
+      }
+    }
+  }
+
+  if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
+    return res.status(400).json({
+      error: 'This learning material needs to be processed again to access its complete content.',
+      processingStatus: 'reprocessing_required',
+    });
   }
 
   try {
@@ -1507,7 +1924,7 @@ Return a valid JSON object matching the schema with an array of chapters.`;
 
 // 3.3 Complete Self-Reviewer Question Generator (Multi-Format, 4 Difficulties, Chapter-Filtered)
 app.post('/api/reviewer-generate', async (req: Request, res: Response) => {
-  const {
+  let {
     pages,
     lessonTitle,
     chapterId,
@@ -1516,13 +1933,31 @@ app.post('/api/reviewer-generate', async (req: Request, res: Response) => {
     questionCount = 10,
     difficulty = 'medium',
     questionTypes = 'mixed',
+    id,
+    documentId,
+    lessonId,
+    filename,
   } = req.body;
 
   const count = Number(questionCount) || 10;
 
   try {
-    if (!pages || !Array.isArray(pages) || pages.length === 0) {
-      return res.status(400).json({ error: 'Please provide lesson pages for reviewer generation' });
+    if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
+      const lookupKey = id || documentId || lessonId || filename || lessonTitle;
+      if (lookupKey) {
+        const stored = getDocumentFromStore(lookupKey);
+        if (stored && stored.pages && !isPlaceholderContent(stored.pages)) {
+          pages = stored.pages;
+          if (!lessonTitle) lessonTitle = stored.title;
+        }
+      }
+    }
+
+    if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
+      return res.status(400).json({
+        error: 'This learning material needs to be processed again to access its complete content.',
+        processingStatus: 'reprocessing_required',
+      });
     }
 
     // Filter pages by chapter range if requested
@@ -1683,9 +2118,23 @@ CRITICAL RULES:
 
 // 3.4 Interactive Flashcards Generator
 app.post('/api/generate-flashcards', async (req: Request, res: Response) => {
-  const { pages, lessonTitle, chapterId } = req.body;
-  if (!pages || !Array.isArray(pages) || pages.length === 0) {
-    return res.status(400).json({ error: 'Please provide lesson pages' });
+  let { pages, lessonTitle, chapterId, id, documentId, lessonId, filename } = req.body;
+  if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
+    const lookupKey = id || documentId || lessonId || filename || lessonTitle;
+    if (lookupKey) {
+      const stored = getDocumentFromStore(lookupKey);
+      if (stored && stored.pages && !isPlaceholderContent(stored.pages)) {
+        pages = stored.pages;
+        if (!lessonTitle) lessonTitle = stored.title;
+      }
+    }
+  }
+
+  if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
+    return res.status(400).json({
+      error: 'This learning material needs to be processed again to access its complete content.',
+      processingStatus: 'reprocessing_required',
+    });
   }
 
   try {
@@ -1769,9 +2218,23 @@ ${lessonContext}`;
 
 // 3.5 Concept Contrasts Generator (Comparing Related Concepts Found in Document)
 app.post('/api/generate-contrasts', async (req: Request, res: Response) => {
-  const { pages, lessonTitle } = req.body;
-  if (!pages || !Array.isArray(pages) || pages.length === 0) {
-    return res.status(400).json({ error: 'Please provide lesson pages' });
+  let { pages, lessonTitle, id, documentId, lessonId, filename } = req.body;
+  if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
+    const lookupKey = id || documentId || lessonId || filename || lessonTitle;
+    if (lookupKey) {
+      const stored = getDocumentFromStore(lookupKey);
+      if (stored && stored.pages && !isPlaceholderContent(stored.pages)) {
+        pages = stored.pages;
+        if (!lessonTitle) lessonTitle = stored.title;
+      }
+    }
+  }
+
+  if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
+    return res.status(400).json({
+      error: 'This learning material needs to be processed again to access its complete content.',
+      processingStatus: 'reprocessing_required',
+    });
   }
 
   try {
@@ -1875,13 +2338,29 @@ ${lessonContext}`;
 
 // 4. FEATURE 3: Ask Study Buddy (AI Tutor) - Two-Source Answer System
 app.post('/api/ask-tutor', async (req: Request, res: Response) => {
-  const { pages, lessonTitle, question, chatHistory = [], tutorMode = 'materials' } = req.body;
+  let { pages, lessonTitle, question, chatHistory = [], tutorMode = 'materials', id, documentId, lessonId, filename } = req.body;
   try {
-    if (!pages || !Array.isArray(pages) || pages.length === 0) {
-      return res.status(400).json({ error: 'Please provide lesson pages for the tutor to reference' });
-    }
     if (!question || typeof question !== 'string') {
       return res.status(400).json({ error: 'Please enter a question for Study Buddy' });
+    }
+
+    // If pages are missing or placeholder, attempt automatic reconstruction from server store
+    if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
+      const lookupKey = id || documentId || lessonId || filename || lessonTitle;
+      if (lookupKey) {
+        const stored = getDocumentFromStore(lookupKey);
+        if (stored && stored.pages && !isPlaceholderContent(stored.pages)) {
+          pages = stored.pages;
+          if (!lessonTitle) lessonTitle = stored.title;
+        }
+      }
+    }
+
+    if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
+      return res.status(400).json({
+        error: 'This learning material needs to be processed again to access its complete content.',
+        processingStatus: 'reprocessing_required',
+      });
     }
 
     // High-Precision Multi-Stage Chunk Retrieval across the entire document
@@ -1897,6 +2376,16 @@ app.post('/api/ask-tutor', async (req: Request, res: Response) => {
     const isFeynman = tutorMode === 'feynman';
 
     const prompt = `You are "ASK STUDY BUDDY", a friendly, patient, and empowering AI tutor specifically built for working college students who balance work shifts and academic studies.
+You understand uploaded learning material deeply as a real tutor, not simply repeating text.
+Your capabilities include:
+- identifying the main topic and important concepts;
+- recognizing headings and subtopics;
+- explaining difficult concepts using simpler language;
+- identifying definitions and providing concrete examples;
+- recognizing important names, dates, formulas, processes, or theories;
+- connecting information between different pages;
+- providing exact source page references whenever possible.
+
 ${isFeynman ? 'You are acting in FEYNMAN TUTOR MODE: Explain difficult concepts in simple, accessible words, provide an everyday relatable example/analogy, and connect the explanation back to the uploaded lesson.' : 'You operate a Two-Source Answer System prioritizing the student\'s uploaded learning material.'}
 
 LESSON TITLE: "${lessonTitle || 'Uploaded Learning Material'}"
@@ -2217,6 +2706,1384 @@ CRITICAL GOALS & HEALTH RULES:
       details: error.message,
     });
   }
+});
+
+// ==============================================================
+// SECURE USER ACCOUNT MANAGEMENT & ADMINISTRATOR SECURITY SYSTEM
+// ==============================================================
+
+interface StoredRoleUser {
+  id: string;
+  email: string;
+  fullName: string;
+  role: 'student' | 'admin' | 'super_admin';
+  assignedAt: string;
+  assignedBy: string;
+  accountStatus: 'active' | 'suspended' | 'pending';
+  lastLogin?: string;
+  institution?: string;
+  course?: string;
+}
+
+interface StoredAdminInvitation {
+  id: string;
+  email: string;
+  fullName: string;
+  role: 'admin' | 'super_admin';
+  invitedBy: string;
+  inviterEmail: string;
+  status: 'pending' | 'accepted' | 'expired' | 'revoked';
+  token: string;
+  expiresAt: string;
+  createdAt: string;
+}
+
+interface StoredAuditLog {
+  id: string;
+  adminUserId: string;
+  adminEmail: string;
+  action: string;
+  targetUserId?: string;
+  targetUserEmail?: string;
+  details?: any;
+  ipAddress?: string;
+  createdAt: string;
+}
+
+interface StoredSystemConfig {
+  allowedModels: string[];
+  defaultDifficulty: string;
+  maxQuestionCount: number;
+  rateLimitRpm: number;
+  cloudSettingsRestricted: boolean;
+  developerAccessRoleRequired: string;
+}
+
+interface StoredMfaFactor {
+  id: string;
+  userId: string;
+  email: string;
+  factorType: 'totp';
+  friendlyName: string;
+  secret: string; // Base32 encoded secret
+  status: 'verified' | 'unverified';
+  enrolledAt: string;
+  verifiedAt?: string;
+}
+
+interface StoredMfaSession {
+  token: string;
+  email: string;
+  aal: 'aal2';
+  expiresAt: number; // Unix timestamp in ms
+}
+
+interface AdminStoreData {
+  bootstrapped: boolean;
+  initialAdminEmail: string;
+  users: Record<string, StoredRoleUser>; // keyed by email lowercase
+  invitations: StoredAdminInvitation[];
+  auditLogs: StoredAuditLog[];
+  systemConfig: StoredSystemConfig;
+  mfaFactors: Record<string, StoredMfaFactor>; // keyed by email lowercase
+  mfaSessions: Record<string, StoredMfaSession>; // keyed by token
+}
+
+const ADMIN_STORE_FILE = path.join(DATA_DIR, 'admin_store.json');
+
+const INITIAL_SUPER_ADMIN_EMAIL = 'historillo.noel1994@gmail.com';
+const INITIAL_SUPER_ADMIN_NAME = 'Noel Historillo';
+
+function loadAdminStore(): AdminStoreData {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (fs.existsSync(ADMIN_STORE_FILE)) {
+      const raw = fs.readFileSync(ADMIN_STORE_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (!parsed.mfaFactors) parsed.mfaFactors = {};
+      if (!parsed.mfaSessions) parsed.mfaSessions = {};
+
+      // Ensure initial super admin exists
+      if (!parsed.users[INITIAL_SUPER_ADMIN_EMAIL.toLowerCase()]) {
+        parsed.users[INITIAL_SUPER_ADMIN_EMAIL.toLowerCase()] = {
+          id: 'admin-super-noel-01',
+          email: INITIAL_SUPER_ADMIN_EMAIL,
+          fullName: INITIAL_SUPER_ADMIN_NAME,
+          role: 'super_admin',
+          assignedAt: new Date().toISOString(),
+          assignedBy: 'system_bootstrap',
+          accountStatus: 'active',
+          institution: 'State Metropolitan University',
+          course: 'Master of Science in Information Technology',
+        };
+      }
+      return parsed;
+    }
+  } catch (err) {
+    console.error('Failed to load admin store, creating fresh store:', err);
+  }
+
+  // Initial fresh store
+  const defaultStore: AdminStoreData = {
+    bootstrapped: true,
+    initialAdminEmail: INITIAL_SUPER_ADMIN_EMAIL,
+    mfaFactors: {},
+    mfaSessions: {},
+    users: {
+      [INITIAL_SUPER_ADMIN_EMAIL.toLowerCase()]: {
+        id: 'admin-super-noel-01',
+        email: INITIAL_SUPER_ADMIN_EMAIL,
+        fullName: INITIAL_SUPER_ADMIN_NAME,
+        role: 'super_admin',
+        assignedAt: new Date().toISOString(),
+        assignedBy: 'system_bootstrap',
+        accountStatus: 'active',
+        institution: 'State Metropolitan University',
+        course: 'Master of Science in Information Technology',
+      },
+      'juan.delacruz@student.univ.edu': {
+        id: 'usr-working-student-01',
+        email: 'juan.delacruz@student.univ.edu',
+        fullName: 'Juan Dela Cruz',
+        role: 'student',
+        assignedAt: new Date().toISOString(),
+        assignedBy: 'public_registration',
+        accountStatus: 'active',
+        institution: 'State Metropolitan University',
+        course: 'BS Business Administration',
+      },
+    },
+    invitations: [],
+    auditLogs: [
+      {
+        id: 'log-bootstrap-01',
+        adminUserId: 'system',
+        adminEmail: 'system@studybuddy.internal',
+        action: 'INITIAL_BOOTSTRAP',
+        targetUserId: 'admin-super-noel-01',
+        targetUserEmail: INITIAL_SUPER_ADMIN_EMAIL,
+        details: {
+          note: 'Initial Super Administrator Noel Historillo provisioned with full administrative privileges.',
+        },
+        ipAddress: '127.0.0.1',
+        createdAt: new Date().toISOString(),
+      },
+    ],
+    systemConfig: {
+      allowedModels: CANDIDATE_MODELS,
+      defaultDifficulty: 'medium',
+      maxQuestionCount: 100,
+      rateLimitRpm: 60,
+      cloudSettingsRestricted: true,
+      developerAccessRoleRequired: 'super_admin',
+    },
+  };
+
+  saveAdminStore(defaultStore);
+  return defaultStore;
+}
+
+function saveAdminStore(store: AdminStoreData): void {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(ADMIN_STORE_FILE, JSON.stringify(store, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Failed to save admin store:', err);
+  }
+}
+
+// In-memory synchronized store
+let adminStore: AdminStoreData = loadAdminStore();
+
+function addAuditLog(params: {
+  adminUserId: string;
+  adminEmail: string;
+  action: string;
+  targetUserId?: string;
+  targetUserEmail?: string;
+  details?: any;
+  ipAddress?: string;
+}): StoredAuditLog {
+  const log: StoredAuditLog = {
+    id: `log-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    adminUserId: params.adminUserId,
+    adminEmail: params.adminEmail,
+    action: params.action,
+    targetUserId: params.targetUserId,
+    targetUserEmail: params.targetUserEmail,
+    details: params.details || {},
+    ipAddress: params.ipAddress || '127.0.0.1',
+    createdAt: new Date().toISOString(),
+  };
+
+  adminStore.auditLogs.unshift(log);
+  // Keep last 500 audit logs
+  if (adminStore.auditLogs.length > 500) {
+    adminStore.auditLogs = adminStore.auditLogs.slice(0, 500);
+  }
+  saveAdminStore(adminStore);
+  return log;
+}
+
+// Authorization Helper Functions
+function getClientIp(req: Request): string {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string') {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.socket.remoteAddress || '127.0.0.1';
+}
+
+function extractRequesterEmail(req: Request): string | null {
+  const headerEmail = req.headers['x-user-email'] || req.headers['x-admin-email'];
+  if (headerEmail && typeof headerEmail === 'string' && headerEmail.trim()) {
+    return headerEmail.trim().toLowerCase();
+  }
+  const authHeader = req.headers['authorization'];
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const payload = parseJwtPayload(authHeader.slice(7));
+    if (payload?.email && typeof payload.email === 'string') {
+      return payload.email.trim().toLowerCase();
+    }
+  }
+  const bodyEmail = req.body?.adminEmail || req.body?.email || req.body?.requesterEmail;
+  if (bodyEmail && typeof bodyEmail === 'string' && bodyEmail.trim()) {
+    return bodyEmail.trim().toLowerCase();
+  }
+  return null;
+}
+
+function resolveUserRole(email?: string): {
+  role: 'student' | 'admin' | 'super_admin';
+  user: StoredRoleUser | null;
+} {
+  if (!email) {
+    return { role: 'student', user: null };
+  }
+  const cleanEmail = email.trim().toLowerCase();
+
+  // Primary Super Admin check
+  if (cleanEmail === INITIAL_SUPER_ADMIN_EMAIL.toLowerCase()) {
+    const existing = adminStore.users[cleanEmail];
+    if (existing) {
+      existing.role = 'super_admin';
+      return { role: 'super_admin', user: existing };
+    }
+    const freshSuper: StoredRoleUser = {
+      id: 'admin-super-noel-01',
+      email: INITIAL_SUPER_ADMIN_EMAIL,
+      fullName: INITIAL_SUPER_ADMIN_NAME,
+      role: 'super_admin',
+      assignedAt: new Date().toISOString(),
+      assignedBy: 'system_bootstrap',
+      accountStatus: 'active',
+    };
+    adminStore.users[cleanEmail] = freshSuper;
+    saveAdminStore(adminStore);
+    return { role: 'super_admin', user: freshSuper };
+  }
+
+  const existing = adminStore.users[cleanEmail];
+  if (existing) {
+    return { role: existing.role, user: existing };
+  }
+
+  // Check pending invitations
+  const invitation = adminStore.invitations.find(
+    (inv) => inv.email.toLowerCase() === cleanEmail && inv.status === 'pending'
+  );
+  if (invitation) {
+    invitation.status = 'accepted';
+    const newUser: StoredRoleUser = {
+      id: `usr-${Date.now()}`,
+      email: cleanEmail,
+      fullName: invitation.fullName,
+      role: invitation.role,
+      assignedAt: new Date().toISOString(),
+      assignedBy: invitation.inviterEmail,
+      accountStatus: 'active',
+    };
+    adminStore.users[cleanEmail] = newUser;
+    saveAdminStore(adminStore);
+    return { role: invitation.role, user: newUser };
+  }
+
+  // Public default is always 'student'
+  return { role: 'student', user: null };
+}
+
+// -------------------------------------------------------------
+// TOTP (Time-based One-Time Password) Cryptographic Engine (RFC 6238)
+// -------------------------------------------------------------
+
+function base32Decode(base32: string): Buffer {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const cleaned = base32.toUpperCase().replace(/[\s=-]/g, '');
+  let bits = 0;
+  let value = 0;
+  const bytes: number[] = [];
+
+  for (let i = 0; i < cleaned.length; i++) {
+    const idx = alphabet.indexOf(cleaned[i]);
+    if (idx === -1) continue;
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+function generateBase32Secret(length = 20): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const bytes = crypto.randomBytes(length);
+  let secret = '';
+  for (let i = 0; i < length; i++) {
+    secret += alphabet[bytes[i] % alphabet.length];
+  }
+  return secret;
+}
+
+function computeTotp(secretBase32: string, counter: number): string {
+  const key = base32Decode(secretBase32);
+  const buf = Buffer.alloc(8);
+  buf.writeBigInt64BE(BigInt(counter));
+  const hmac = crypto.createHmac('sha1', key).update(buf).digest();
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const code = (hmac.readUInt32BE(offset) & 0x7fffffff) % 1000000;
+  return code.toString().padStart(6, '0');
+}
+
+function verifyTotp(secretBase32: string, token: string, window = 1): boolean {
+  if (!token || typeof token !== 'string') return false;
+  const cleanToken = token.trim().replace(/\s+/g, '');
+  if (cleanToken.length !== 6 || !/^\d{6}$/.test(cleanToken)) return false;
+  const epoch = Math.floor(Date.now() / 1000);
+  const currentStep = Math.floor(epoch / 30);
+  for (let i = -window; i <= window; i++) {
+    if (computeTotp(secretBase32, currentStep + i) === cleanToken) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseJwtPayload(token: string): any | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function verifyAdminMfaAssurance(req: Request, adminEmail: string): {
+  allowed: boolean;
+  currentAal: 'none' | 'aal1' | 'aal2';
+  code: string;
+  message: string;
+  requiresEnrollment?: boolean;
+} {
+  const cleanEmail = adminEmail.toLowerCase().trim();
+  const mfaFactor = adminStore.mfaFactors?.[cleanEmail];
+
+  // 1. Inspect Supabase JWT if passed in Authorization or x-supabase-access-token
+  const authHeader = req.headers['authorization'];
+  const tokenHeader =
+    (req.headers['x-supabase-access-token'] as string) ||
+    (authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null);
+
+  if (typeof tokenHeader === 'string' && tokenHeader.length > 20) {
+    const payload = parseJwtPayload(tokenHeader);
+    if (payload) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const isNotExpired = !payload.exp || payload.exp > nowSec;
+      const isMatchingUser = !payload.email || payload.email.toLowerCase() === cleanEmail;
+
+      if (isNotExpired && isMatchingUser) {
+        // Supabase JWT aal claim indicates assurance level
+        if (payload.aal === 'aal2') {
+          return {
+            allowed: true,
+            currentAal: 'aal2',
+            code: 'AAL2_VERIFIED',
+            message: 'Supabase JWT AAL2 Verified.',
+          };
+        }
+      }
+    }
+  }
+
+  // 2. Inspect session token in x-admin-mfa-token header
+  const mfaTokenHeader = req.headers['x-admin-mfa-token'];
+  if (typeof mfaTokenHeader === 'string' && mfaTokenHeader.trim()) {
+    const session = adminStore.mfaSessions?.[mfaTokenHeader.trim()];
+    if (session && session.email.toLowerCase() === cleanEmail && session.expiresAt > Date.now()) {
+      return {
+        allowed: true,
+        currentAal: 'aal2',
+        code: 'AAL2_VERIFIED',
+        message: 'Active MFA AAL2 Session Verified.',
+      };
+    }
+  }
+
+  // 3. Inspect active valid sessions by email
+  const existingSession = Object.values(adminStore.mfaSessions || {}).find(
+    (s) => s.email.toLowerCase() === cleanEmail && s.expiresAt > Date.now()
+  );
+  if (existingSession) {
+    return {
+      allowed: true,
+      currentAal: 'aal2',
+      code: 'AAL2_VERIFIED',
+      message: 'Active MFA AAL2 Session Verified.',
+    };
+  }
+
+  // 4. Check if factor is enrolled & verified
+  if (!mfaFactor || mfaFactor.status !== 'verified') {
+    return {
+      allowed: false,
+      currentAal: 'none',
+      requiresEnrollment: true,
+      code: 'MFA_ENROLLMENT_REQUIRED',
+      message:
+        'Access Denied: Multifactor Authentication (MFA TOTP) enrollment is required for all administrative accounts. Please enable MFA in Account Security.',
+    };
+  }
+
+  // 5. Factor is enrolled, but current session is at AAL1 (needs 6-digit TOTP challenge verification)
+  return {
+    allowed: false,
+    currentAal: 'aal1',
+    requiresEnrollment: false,
+    code: 'MFA_VERIFICATION_REQUIRED',
+    message:
+      'Access Denied: Multifactor Authentication verification required. Please verify your 6-digit TOTP code to establish an AAL2 session.',
+  };
+}
+
+// -------------------------------------------------------------
+// ENDPOINTS
+// -------------------------------------------------------------
+
+// 1. One-time Initial Super Administrator Bootstrap Status & Trigger
+app.get('/api/admin/bootstrap-status', (_req: Request, res: Response) => {
+  const superAdminCount = Object.values(adminStore.users).filter(
+    (u) => u.role === 'super_admin' && u.accountStatus === 'active'
+  ).length;
+
+  res.json({
+    bootstrapped: adminStore.bootstrapped,
+    initialAdminEmail: adminStore.initialAdminEmail,
+    initialAdminName: INITIAL_SUPER_ADMIN_NAME,
+    superAdminCount,
+  });
+});
+
+app.post('/api/admin/bootstrap-initial', (req: Request, res: Response) => {
+  const { email, fullName, secretKey } = req.body;
+  const ip = getClientIp(req);
+
+  // If already bootstrapped with active super admin, prevent re-execution
+  const superAdminCount = Object.values(adminStore.users).filter(
+    (u) => u.role === 'super_admin' && u.accountStatus === 'active'
+  ).length;
+
+  const targetEmail = (email && typeof email === 'string' ? email.trim() : INITIAL_SUPER_ADMIN_EMAIL).toLowerCase();
+  const targetName = fullName && typeof fullName === 'string' ? fullName.trim() : INITIAL_SUPER_ADMIN_NAME;
+
+  if (adminStore.bootstrapped && superAdminCount > 0 && targetEmail !== INITIAL_SUPER_ADMIN_EMAIL.toLowerCase()) {
+    return res.status(400).json({
+      error: 'Initial Super Administrator bootstrap has already been completed. Re-initialization is disabled.',
+      initialAdminEmail: adminStore.initialAdminEmail,
+    });
+  }
+
+  const superAdminUser: StoredRoleUser = {
+    id: `admin-super-${Date.now()}`,
+    email: targetEmail,
+    fullName: targetName,
+    role: 'super_admin',
+    assignedAt: new Date().toISOString(),
+    assignedBy: 'initial_bootstrap',
+    accountStatus: 'active',
+    institution: 'State Metropolitan University',
+  };
+
+  adminStore.users[targetEmail] = superAdminUser;
+  adminStore.bootstrapped = true;
+  adminStore.initialAdminEmail = targetEmail;
+
+  addAuditLog({
+    adminUserId: superAdminUser.id,
+    adminEmail: targetEmail,
+    action: 'INITIAL_BOOTSTRAP',
+    targetUserId: superAdminUser.id,
+    targetUserEmail: targetEmail,
+    details: {
+      message: `Initial Super Administrator ${targetName} (${targetEmail}) activated.`,
+    },
+    ipAddress: ip,
+  });
+
+  saveAdminStore(adminStore);
+
+  return res.json({
+    success: true,
+    message: `Initial Super Administrator ${targetName} (${targetEmail}) is active with full administrative authority.`,
+    user: superAdminUser,
+  });
+});
+
+// 2. Server-Side Role Verification Endpoint (Called after Supabase Auth)
+app.post('/api/auth/verify-role', (req: Request, res: Response) => {
+  const { email, userId, fullName, degree, jobTitle, institution } = req.body;
+  if (!email || typeof email !== 'string') {
+    return res.status(400).json({ error: 'Valid email is required for role verification.' });
+  }
+
+  const cleanEmail = email.trim().toLowerCase();
+  const ip = getClientIp(req);
+  const { role, user } = resolveUserRole(cleanEmail);
+
+  // Update or insert user record
+  if (user) {
+    user.lastLogin = new Date().toISOString();
+    if (fullName) user.fullName = fullName;
+    if (institution) user.institution = institution;
+    saveAdminStore(adminStore);
+  } else {
+    // Register new student account in server store
+    const newStudent: StoredRoleUser = {
+      id: userId || `usr-${Date.now()}`,
+      email: cleanEmail,
+      fullName: fullName || cleanEmail.split('@')[0],
+      role: 'student',
+      assignedAt: new Date().toISOString(),
+      assignedBy: 'public_registration',
+      accountStatus: 'active',
+      institution: institution || 'State Metropolitan University',
+      course: degree || 'College Student',
+      lastLogin: new Date().toISOString(),
+    };
+    adminStore.users[cleanEmail] = newStudent;
+    saveAdminStore(adminStore);
+  }
+
+  const accountStatus = adminStore.users[cleanEmail]?.accountStatus || 'active';
+
+  // If student account is suspended, notify frontend
+  if (accountStatus === 'suspended') {
+    addAuditLog({
+      adminUserId: 'system',
+      adminEmail: 'security@studybuddy.internal',
+      action: 'LOGIN_ATTEMPT_SUSPENDED_ACCOUNT',
+      targetUserEmail: cleanEmail,
+      details: { note: 'Login rejected because account is currently suspended by an administrator.' },
+      ipAddress: ip,
+    });
+    return res.status(403).json({
+      error: 'Account access has been disabled by a system administrator. Please contact academic support.',
+      suspended: true,
+      role: 'student',
+    });
+  }
+
+  return res.json({
+    success: true,
+    email: cleanEmail,
+    role,
+    accountStatus,
+    isSuperAdmin: role === 'super_admin',
+    isAdmin: role === 'admin' || role === 'super_admin',
+    permissions: {
+      canAccessAdminDashboard: role === 'admin' || role === 'super_admin',
+      canManageStudents: role === 'admin' || role === 'super_admin',
+      canManageAdmins: role === 'super_admin',
+      canAccessCloudSettings: role === 'super_admin',
+      canViewAuditLogs: role === 'admin' || role === 'super_admin',
+    },
+  });
+});
+
+// Middleware: Require Administrator or Super Administrator
+function requireAdminRole(req: Request, res: Response, next: express.NextFunction) {
+  const email = extractRequesterEmail(req);
+  if (!email) {
+    return res.status(401).json({ error: 'Unauthorized: Authentication required.' });
+  }
+
+  const { role, user } = resolveUserRole(email);
+  if (role !== 'admin' && role !== 'super_admin') {
+    const ip = getClientIp(req);
+    addAuditLog({
+      adminUserId: 'anonymous',
+      adminEmail: email,
+      action: 'UNAUTHORIZED_ADMIN_ACCESS_ATTEMPT',
+      details: { path: req.path, method: req.method },
+      ipAddress: ip,
+    });
+    return res.status(403).json({
+      error: 'HTTP 403 Forbidden: Administrative permissions required for this operation.',
+    });
+  }
+
+  if (user && user.accountStatus === 'suspended') {
+    return res.status(403).json({
+      error: 'HTTP 403 Forbidden: Your administrator account has been suspended.',
+    });
+  }
+
+  // Strict Backend MFA Assurance Check: Require Supabase AAL2 / TOTP verification
+  const mfaCheck = verifyAdminMfaAssurance(req, email);
+  if (!mfaCheck.allowed) {
+    const ip = getClientIp(req);
+    addAuditLog({
+      adminUserId: user?.id || 'unknown',
+      adminEmail: email,
+      action: 'ADMIN_ACCESS_BLOCKED_MFA_REQUIRED',
+      details: {
+        path: req.path,
+        method: req.method,
+        currentAal: mfaCheck.currentAal,
+        requiresEnrollment: mfaCheck.requiresEnrollment,
+      },
+      ipAddress: ip,
+    });
+    return res.status(403).json({
+      error: mfaCheck.code,
+      message: mfaCheck.message,
+      requiresMfa: true,
+      requiresEnrollment: mfaCheck.requiresEnrollment || false,
+      currentAal: mfaCheck.currentAal,
+    });
+  }
+
+  (req as any).userRole = role;
+  (req as any).requesterEmail = email;
+  (req as any).requesterUser = user;
+  next();
+}
+
+// Middleware: Require Super Administrator
+function requireSuperAdminRole(req: Request, res: Response, next: express.NextFunction) {
+  const email = extractRequesterEmail(req);
+  if (!email) {
+    return res.status(401).json({ error: 'Unauthorized: Authentication required.' });
+  }
+
+  const { role, user } = resolveUserRole(email);
+  if (role !== 'super_admin') {
+    const ip = getClientIp(req);
+    addAuditLog({
+      adminUserId: user?.id || 'anonymous',
+      adminEmail: email,
+      action: 'UNAUTHORIZED_SUPER_ADMIN_ATTEMPT',
+      details: { path: req.path, method: req.method },
+      ipAddress: ip,
+    });
+    return res.status(403).json({
+      error: 'HTTP 403 Forbidden: Super Administrator permissions required for this operation.',
+    });
+  }
+
+  if (user && user.accountStatus === 'suspended') {
+    return res.status(403).json({
+      error: 'HTTP 403 Forbidden: Your administrator account has been suspended.',
+    });
+  }
+
+  // Strict Backend MFA Assurance Check: Require Supabase AAL2 / TOTP verification
+  const mfaCheck = verifyAdminMfaAssurance(req, email);
+  if (!mfaCheck.allowed) {
+    const ip = getClientIp(req);
+    addAuditLog({
+      adminUserId: user?.id || 'unknown',
+      adminEmail: email,
+      action: 'SUPER_ADMIN_ACCESS_BLOCKED_MFA_REQUIRED',
+      details: {
+        path: req.path,
+        method: req.method,
+        currentAal: mfaCheck.currentAal,
+        requiresEnrollment: mfaCheck.requiresEnrollment,
+      },
+      ipAddress: ip,
+    });
+    return res.status(403).json({
+      error: mfaCheck.code,
+      message: mfaCheck.message,
+      requiresMfa: true,
+      requiresEnrollment: mfaCheck.requiresEnrollment || false,
+      currentAal: mfaCheck.currentAal,
+    });
+  }
+
+  (req as any).userRole = role;
+  (req as any).requesterEmail = email;
+  (req as any).requesterUser = user;
+  next();
+}
+
+// -------------------------------------------------------------
+// MFA (MULTI-FACTOR AUTHENTICATION) MANAGEMENT ENDPOINTS
+// -------------------------------------------------------------
+
+// Inspect current MFA Factor & Assurance Status
+app.get('/api/admin/mfa/status', (req: Request, res: Response) => {
+  const email = extractRequesterEmail(req);
+  if (!email) {
+    return res.status(401).json({ error: 'Authentication required to inspect MFA status.' });
+  }
+
+  const cleanEmail = email.toLowerCase().trim();
+  const factor = adminStore.mfaFactors?.[cleanEmail];
+  const isEnrolledAndVerified = Boolean(factor && factor.status === 'verified');
+  const mfaCheck = verifyAdminMfaAssurance(req, cleanEmail);
+
+  return res.json({
+    email: cleanEmail,
+    isEnrolled: isEnrolledAndVerified,
+    status: factor?.status || 'none',
+    friendlyName: factor?.friendlyName || 'Google Authenticator / Microsoft Authenticator (TOTP)',
+    factorId: factor?.id || null,
+    verifiedAt: factor?.verifiedAt || null,
+    currentAal: mfaCheck.allowed ? 'aal2' : isEnrolledAndVerified ? 'aal1' : 'none',
+    nextLevel: isEnrolledAndVerified ? 'aal2' : 'aal1',
+  });
+});
+
+// Initiate TOTP Authenticator Enrollment (Generates Base32 Secret, URI, and SVG QR Code)
+app.post('/api/admin/mfa/enroll', async (req: Request, res: Response) => {
+  const email = extractRequesterEmail(req);
+  if (!email) {
+    return res.status(401).json({ error: 'Authentication required to enroll in MFA.' });
+  }
+
+  const cleanEmail = email.toLowerCase().trim();
+  const friendlyName = req.body?.friendlyName || 'StudyBuddy Authenticator';
+  const issuer = 'Study Buddy AI';
+
+  const secret = generateBase32Secret(20);
+  const factorId = `totp-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  const encodedIssuer = encodeURIComponent(issuer);
+  const encodedAccount = encodeURIComponent(cleanEmail);
+  const otpauthUri = `otpauth://totp/${encodedIssuer}:${encodedAccount}?secret=${secret}&issuer=${encodedIssuer}&algorithm=SHA1&digits=6&period=30`;
+
+  try {
+    const qrCodeSvg = await QRCode.toString(otpauthUri, {
+      type: 'svg',
+      margin: 1,
+      color: { dark: '#0f172a', light: '#ffffff' },
+    });
+
+    // Save temporary unverified factor (DOES NOT display as enabled until verified)
+    const factor: StoredMfaFactor = {
+      id: factorId,
+      userId: adminStore.users[cleanEmail]?.id || `usr-${Date.now()}`,
+      email: cleanEmail,
+      factorType: 'totp',
+      friendlyName,
+      secret,
+      status: 'unverified',
+      enrolledAt: new Date().toISOString(),
+    };
+
+    if (!adminStore.mfaFactors) adminStore.mfaFactors = {};
+    adminStore.mfaFactors[cleanEmail] = factor;
+    saveAdminStore(adminStore);
+
+    return res.json({
+      id: factorId,
+      factorType: 'totp',
+      totp: {
+        qrCode: qrCodeSvg,
+        secret,
+        uri: otpauthUri,
+      },
+      message:
+        'MFA enrollment initiated. Scan the QR code using Google Authenticator or Microsoft Authenticator, then enter the 6-digit verification code.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to generate TOTP QR Code: ' + err.message });
+  }
+});
+
+// Verify 6-digit TOTP Code and Upgrade to Assurance Level AAL2
+app.post('/api/admin/mfa/verify', (req: Request, res: Response) => {
+  const email = extractRequesterEmail(req);
+  const { code, factorId } = req.body;
+
+  if (!email) {
+    return res.status(401).json({ error: 'Authentication required for MFA verification.' });
+  }
+  if (!code || typeof code !== 'string') {
+    return res.status(400).json({ error: 'Six-digit verification code is required.' });
+  }
+
+  const cleanEmail = email.toLowerCase().trim();
+  const cleanCode = code.trim().replace(/\s+/g, '');
+  const ip = getClientIp(req);
+  const factor = adminStore.mfaFactors?.[cleanEmail];
+
+  if (!factor) {
+    return res.status(400).json({
+      error: 'No MFA enrollment found for this account. Please initiate enrollment first.',
+    });
+  }
+
+  const isValid = verifyTotp(factor.secret, cleanCode);
+  if (!isValid) {
+    addAuditLog({
+      adminUserId: factor.userId,
+      adminEmail: cleanEmail,
+      action: 'MFA_VERIFICATION_FAILED',
+      details: { note: 'Incorrect 6-digit TOTP verification code entered.' },
+      ipAddress: ip,
+    });
+    return res.status(400).json({
+      error: 'Invalid verification code. Please check your Google Authenticator or Microsoft Authenticator app and try again.',
+    });
+  }
+
+  // Verification succeeded! Mark factor as verified
+  const isFirstTime = factor.status !== 'verified';
+  factor.status = 'verified';
+  factor.verifiedAt = factor.verifiedAt || new Date().toISOString();
+
+  // Create an AAL2 session token valid for 12 hours
+  const sessionToken = `mfa-session-${Date.now()}-${crypto.randomBytes(16).toString('hex')}`;
+  const expiresAt = Date.now() + 12 * 60 * 60 * 1000;
+
+  if (!adminStore.mfaSessions) adminStore.mfaSessions = {};
+  adminStore.mfaSessions[sessionToken] = {
+    token: sessionToken,
+    email: cleanEmail,
+    aal: 'aal2',
+    expiresAt,
+  };
+
+  saveAdminStore(adminStore);
+
+  addAuditLog({
+    adminUserId: factor.userId,
+    adminEmail: cleanEmail,
+    action: isFirstTime ? 'MFA_ENROLLMENT_VERIFIED' : 'MFA_CHALLENGE_VERIFIED',
+    details: {
+      note: isFirstTime
+        ? 'TOTP Multifactor Authentication successfully activated and verified.'
+        : 'TOTP MFA verification challenge completed. Assurance level upgraded to AAL2.',
+      aal: 'aal2',
+    },
+    ipAddress: ip,
+  });
+
+  return res.json({
+    success: true,
+    message: 'MFA Enabled and Verified. Assurance level upgraded to AAL2.',
+    status: 'verified',
+    aal: 'aal2',
+    sessionToken,
+    expiresAt,
+  });
+});
+
+// Disable / Unenroll Authenticator (Option for managing or replacing existing authenticator)
+app.post('/api/admin/mfa/unenroll', (req: Request, res: Response) => {
+  const email = extractRequesterEmail(req);
+  const { code } = req.body;
+
+  if (!email) {
+    return res.status(401).json({ error: 'Authentication required to manage MFA.' });
+  }
+
+  const cleanEmail = email.toLowerCase().trim();
+  const ip = getClientIp(req);
+  const factor = adminStore.mfaFactors?.[cleanEmail];
+
+  if (!factor) {
+    return res.status(400).json({ error: 'No active MFA authenticator found for this account.' });
+  }
+
+  // If a 6-digit confirmation code was passed, verify it
+  if (code && typeof code === 'string' && code.trim().length === 6) {
+    const isValid = verifyTotp(factor.secret, code.trim());
+    if (!isValid) {
+      return res.status(400).json({ error: 'Invalid verification code. Authenticator could not be removed.' });
+    }
+  }
+
+  // Delete factor and revoke active sessions
+  delete adminStore.mfaFactors[cleanEmail];
+  if (adminStore.mfaSessions) {
+    for (const [token, session] of Object.entries(adminStore.mfaSessions)) {
+      if (session.email.toLowerCase() === cleanEmail) {
+        delete adminStore.mfaSessions[token];
+      }
+    }
+  }
+  saveAdminStore(adminStore);
+
+  addAuditLog({
+    adminUserId: factor.userId,
+    adminEmail: cleanEmail,
+    action: 'MFA_AUTHENTICATOR_UNENROLLED',
+    details: { note: 'Multifactor authentication disabled by account holder.' },
+    ipAddress: ip,
+  });
+
+  return res.json({
+    success: true,
+    message: 'MFA Authenticator has been disabled. You may re-enroll or replace your authenticator at any time.',
+  });
+});
+
+// 3. System Overview
+app.get('/api/admin/overview', requireAdminRole, (_req: Request, res: Response) => {
+  const users = Object.values(adminStore.users);
+  const totalStudents = users.filter((u) => u.role === 'student').length;
+  const totalAdmins = users.filter((u) => u.role === 'admin').length;
+  const totalSuperAdmins = users.filter((u) => u.role === 'super_admin').length;
+  const suspendedAccounts = users.filter((u) => u.accountStatus === 'suspended').length;
+
+  res.json({
+    success: true,
+    totalUsers: users.length,
+    totalStudents,
+    totalAdmins,
+    totalSuperAdmins,
+    suspendedAccounts,
+    pendingInvitations: adminStore.invitations.filter((i) => i.status === 'pending').length,
+    totalAuditLogs: adminStore.auditLogs.length,
+    aiServiceStatus: 'operational',
+    primaryModel: PRIMARY_MODEL,
+    databaseStatus: 'connected',
+    bootstrapped: adminStore.bootstrapped,
+    initialAdminEmail: adminStore.initialAdminEmail,
+  });
+});
+
+// 4. Student Account Management
+app.get('/api/admin/students', requireAdminRole, (req: Request, res: Response) => {
+  const query = (req.query.search as string || '').toLowerCase().trim();
+  const allUsers = Object.values(adminStore.users);
+
+  let students = allUsers.filter((u) => u.role === 'student');
+  if (query) {
+    students = students.filter(
+      (s) => s.fullName.toLowerCase().includes(query) || s.email.toLowerCase().includes(query)
+    );
+  }
+
+  // Never return password or confidential keys
+  res.json({
+    success: true,
+    total: students.length,
+    students: students.map((s) => ({
+      id: s.id,
+      fullName: s.fullName,
+      email: s.email,
+      role: s.role,
+      accountStatus: s.accountStatus,
+      institution: s.institution || 'State Metropolitan University',
+      course: s.course || 'College Student',
+      createdAt: s.assignedAt,
+      lastLogin: s.lastLogin || s.assignedAt,
+    })),
+  });
+});
+
+app.post('/api/admin/students/:id/status', requireAdminRole, (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { status, reason } = req.body;
+  const ip = getClientIp(req);
+  const adminEmail = (req as any).requesterEmail;
+
+  if (status !== 'active' && status !== 'suspended') {
+    return res.status(400).json({ error: 'Status must be active or suspended.' });
+  }
+
+  const target = Object.values(adminStore.users).find((u) => u.id === id || u.email === id);
+  if (!target) {
+    return res.status(404).json({ error: 'Student account not found.' });
+  }
+
+  if (target.role !== 'student') {
+    return res.status(400).json({ error: 'Use Administrator Management to alter administrator accounts.' });
+  }
+
+  target.accountStatus = status;
+  saveAdminStore(adminStore);
+
+  addAuditLog({
+    adminUserId: (req as any).requesterUser?.id || 'admin',
+    adminEmail,
+    action: status === 'suspended' ? 'STUDENT_ACCOUNT_SUSPENDED' : 'STUDENT_ACCOUNT_RESTORED',
+    targetUserId: target.id,
+    targetUserEmail: target.email,
+    details: { reason: reason || 'Administrative action' },
+    ipAddress: ip,
+  });
+
+  res.json({
+    success: true,
+    message: `Student ${target.fullName} (${target.email}) account status updated to ${status}.`,
+    student: target,
+  });
+});
+
+// 5. Administrator Account Management
+app.get('/api/admin/admins', requireAdminRole, (_req: Request, res: Response) => {
+  const allUsers = Object.values(adminStore.users);
+  const admins = allUsers.filter((u) => u.role === 'admin' || u.role === 'super_admin');
+
+  res.json({
+    success: true,
+    total: admins.length,
+    admins: admins.map((a) => ({
+      id: a.id,
+      fullName: a.fullName,
+      email: a.email,
+      role: a.role,
+      accountStatus: a.accountStatus,
+      createdAt: a.assignedAt,
+      lastLogin: a.lastLogin || a.assignedAt,
+      assignedBy: a.assignedBy,
+      isInitialSuperAdmin: a.email.toLowerCase() === adminStore.initialAdminEmail.toLowerCase(),
+    })),
+    invitations: adminStore.invitations,
+  });
+});
+
+// Add New Administrator (Invite)
+app.post('/api/admin/admins/invite', requireAdminRole, (req: Request, res: Response) => {
+  const { email, fullName, role = 'admin' } = req.body;
+  const requesterEmail = (req as any).requesterEmail;
+  const requesterRole = (req as any).userRole;
+  const ip = getClientIp(req);
+
+  if (!email || !fullName) {
+    return res.status(400).json({ error: 'Full name and email are required.' });
+  }
+
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanName = fullName.trim();
+
+  // Role permissions check: Only Super Admin can invite Super Admin
+  if (role === 'super_admin' && requesterRole !== 'super_admin') {
+    return res.status(403).json({
+      error: 'HTTP 403 Forbidden: Only a Super Administrator can invite another Super Administrator.',
+    });
+  }
+
+  if (role !== 'admin' && role !== 'super_admin') {
+    return res.status(400).json({ error: 'Role must be admin or super_admin.' });
+  }
+
+  // Check if already an administrator
+  if (adminStore.users[cleanEmail] && (adminStore.users[cleanEmail].role === 'admin' || adminStore.users[cleanEmail].role === 'super_admin')) {
+    return res.status(400).json({
+      error: `Account ${cleanEmail} is already assigned as a ${adminStore.users[cleanEmail].role}.`,
+    });
+  }
+
+  // Generate single-use invitation token
+  const token = `inv-${crypto.randomBytes(16).toString('hex')}`;
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 days
+
+  const invitation: StoredAdminInvitation = {
+    id: `inv-${Date.now()}`,
+    email: cleanEmail,
+    fullName: cleanName,
+    role,
+    invitedBy: (req as any).requesterUser?.id || 'admin',
+    inviterEmail: requesterEmail,
+    status: 'pending',
+    token,
+    expiresAt,
+    createdAt: new Date().toISOString(),
+  };
+
+  // If user already exists in users list, promote directly
+  if (adminStore.users[cleanEmail]) {
+    adminStore.users[cleanEmail].role = role;
+    adminStore.users[cleanEmail].fullName = cleanName;
+    adminStore.users[cleanEmail].assignedBy = requesterEmail;
+  }
+
+  adminStore.invitations.unshift(invitation);
+  saveAdminStore(adminStore);
+
+  addAuditLog({
+    adminUserId: (req as any).requesterUser?.id || 'admin',
+    adminEmail: requesterEmail,
+    action: 'ADMIN_INVITATION_CREATED',
+    targetUserEmail: cleanEmail,
+    details: {
+      role,
+      invitedFullName: cleanName,
+      expiresAt,
+    },
+    ipAddress: ip,
+  });
+
+  res.json({
+    success: true,
+    message: `Administrator invitation created for ${cleanName} (${cleanEmail}) as ${role.toUpperCase()}.`,
+    invitation,
+  });
+});
+
+// Update Administrator Role (Promote / Demote)
+app.post('/api/admin/admins/:id/role', requireSuperAdminRole, (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { newRole } = req.body;
+  const requesterEmail = (req as any).requesterEmail;
+  const ip = getClientIp(req);
+
+  if (newRole !== 'admin' && newRole !== 'super_admin' && newRole !== 'student') {
+    return res.status(400).json({ error: 'Invalid role assignment.' });
+  }
+
+  const target = Object.values(adminStore.users).find((u) => u.id === id || u.email.toLowerCase() === id.toLowerCase());
+  if (!target) {
+    return res.status(404).json({ error: 'Administrator account not found.' });
+  }
+
+  // CRITICAL SAFEGUARD: Prevent demoting the last active Super Administrator
+  if (target.role === 'super_admin' && newRole !== 'super_admin') {
+    const activeSuperAdmins = Object.values(adminStore.users).filter(
+      (u) => u.role === 'super_admin' && u.accountStatus === 'active'
+    );
+    if (activeSuperAdmins.length <= 1) {
+      return res.status(400).json({
+        error: 'Operation Denied: Cannot demote the last active Super Administrator. Promote another administrator first.',
+      });
+    }
+  }
+
+  const oldRole = target.role;
+  target.role = newRole;
+  target.assignedBy = requesterEmail;
+  target.assignedAt = new Date().toISOString();
+  saveAdminStore(adminStore);
+
+  addAuditLog({
+    adminUserId: (req as any).requesterUser?.id || 'super_admin',
+    adminEmail: requesterEmail,
+    action: 'ADMIN_ROLE_UPDATED',
+    targetUserId: target.id,
+    targetUserEmail: target.email,
+    details: { oldRole, newRole },
+    ipAddress: ip,
+  });
+
+  res.json({
+    success: true,
+    message: `Role for ${target.fullName} (${target.email}) changed from ${oldRole} to ${newRole}.`,
+    user: target,
+  });
+});
+
+// Revoke Administrator Privileges
+app.post('/api/admin/admins/:id/revoke', requireSuperAdminRole, (req: Request, res: Response) => {
+  const { id } = req.params;
+  const requesterEmail = (req as any).requesterEmail;
+  const ip = getClientIp(req);
+
+  const target = Object.values(adminStore.users).find((u) => u.id === id || u.email.toLowerCase() === id.toLowerCase());
+  if (!target) {
+    return res.status(404).json({ error: 'Administrator account not found.' });
+  }
+
+  // CRITICAL SAFEGUARD: Cannot revoke the last active Super Administrator
+  if (target.role === 'super_admin') {
+    const activeSuperAdmins = Object.values(adminStore.users).filter(
+      (u) => u.role === 'super_admin' && u.accountStatus === 'active'
+    );
+    if (activeSuperAdmins.length <= 1) {
+      return res.status(400).json({
+        error: 'Operation Denied: Cannot revoke privileges of the last active Super Administrator.',
+      });
+    }
+  }
+
+  const previousRole = target.role;
+  target.role = 'student';
+  target.assignedBy = requesterEmail;
+  saveAdminStore(adminStore);
+
+  addAuditLog({
+    adminUserId: (req as any).requesterUser?.id || 'super_admin',
+    adminEmail: requesterEmail,
+    action: 'ADMIN_PRIVILEGES_REVOKED',
+    targetUserId: target.id,
+    targetUserEmail: target.email,
+    details: { previousRole },
+    ipAddress: ip,
+  });
+
+  res.json({
+    success: true,
+    message: `Administrative privileges revoked for ${target.fullName} (${target.email}). Account set to student.`,
+    user: target,
+  });
+});
+
+// 6. Security Audit Logs
+app.get('/api/admin/audit-logs', requireAdminRole, (_req: Request, res: Response) => {
+  res.json({
+    success: true,
+    total: adminStore.auditLogs.length,
+    logs: adminStore.auditLogs,
+  });
+});
+
+// 7. System Configuration
+app.get('/api/admin/system-config', requireSuperAdminRole, (_req: Request, res: Response) => {
+  res.json({
+    success: true,
+    config: adminStore.systemConfig,
+  });
+});
+
+app.post('/api/admin/system-config', requireSuperAdminRole, (req: Request, res: Response) => {
+  const { allowedModels, defaultDifficulty, maxQuestionCount, rateLimitRpm, cloudSettingsRestricted } = req.body;
+  const requesterEmail = (req as any).requesterEmail;
+  const ip = getClientIp(req);
+
+  if (allowedModels && Array.isArray(allowedModels)) {
+    adminStore.systemConfig.allowedModels = allowedModels;
+  }
+  if (defaultDifficulty) {
+    adminStore.systemConfig.defaultDifficulty = defaultDifficulty;
+  }
+  if (maxQuestionCount) {
+    adminStore.systemConfig.maxQuestionCount = Number(maxQuestionCount);
+  }
+  if (rateLimitRpm) {
+    adminStore.systemConfig.rateLimitRpm = Number(rateLimitRpm);
+  }
+  if (typeof cloudSettingsRestricted === 'boolean') {
+    adminStore.systemConfig.cloudSettingsRestricted = cloudSettingsRestricted;
+  }
+
+  saveAdminStore(adminStore);
+
+  addAuditLog({
+    adminUserId: (req as any).requesterUser?.id || 'super_admin',
+    adminEmail: requesterEmail,
+    action: 'SYSTEM_CONFIG_UPDATED',
+    details: req.body,
+    ipAddress: ip,
+  });
+
+  res.json({
+    success: true,
+    message: 'System configuration updated successfully.',
+    config: adminStore.systemConfig,
+  });
+});
+
+// 8. User Account Deletion Request
+app.post('/api/user/delete-account', (req: Request, res: Response) => {
+  const { email, passwordConfirmation } = req.body;
+  const ip = getClientIp(req);
+
+  if (!email || typeof email !== 'string') {
+    return res.status(400).json({ error: 'Email is required to request account deletion.' });
+  }
+
+  const cleanEmail = email.trim().toLowerCase();
+  const target = adminStore.users[cleanEmail];
+
+  // CRITICAL SAFEGUARD: Prevent deletion of the last active Super Administrator
+  if (target && target.role === 'super_admin') {
+    const activeSuperAdmins = Object.values(adminStore.users).filter(
+      (u) => u.role === 'super_admin' && u.accountStatus === 'active'
+    );
+    if (activeSuperAdmins.length <= 1) {
+      return res.status(400).json({
+        error: 'Operation Denied: Cannot delete the last active Super Administrator account.',
+      });
+    }
+  }
+
+  if (target) {
+    delete adminStore.users[cleanEmail];
+    saveAdminStore(adminStore);
+  }
+
+  addAuditLog({
+    adminUserId: target?.id || 'user',
+    adminEmail: cleanEmail,
+    action: 'USER_ACCOUNT_DELETED',
+    targetUserEmail: cleanEmail,
+    details: { reason: 'User requested self-deletion of account and study records.' },
+    ipAddress: ip,
+  });
+
+  res.json({
+    success: true,
+    message: 'Your account and personal data have been scheduled for deletion in accordance with data retention policies.',
+  });
+});
+
+// 9. User Profile Update Endpoint
+app.post('/api/user/profile', (req: Request, res: Response) => {
+  const { email, firstName, middleName, lastName, displayName, institution, course, yearLevel, phone } = req.body;
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required' });
+  }
+
+  const cleanEmail = email.trim().toLowerCase();
+  let user = adminStore.users[cleanEmail];
+
+  const fullName = [firstName, middleName, lastName].filter(Boolean).join(' ') || displayName || cleanEmail.split('@')[0];
+
+  if (!user) {
+    user = {
+      id: `usr-${Date.now()}`,
+      email: cleanEmail,
+      fullName,
+      role: cleanEmail === INITIAL_SUPER_ADMIN_EMAIL.toLowerCase() ? 'super_admin' : 'student',
+      assignedAt: new Date().toISOString(),
+      assignedBy: 'profile_sync',
+      accountStatus: 'active',
+      institution: institution || '',
+      course: course || '',
+    };
+    adminStore.users[cleanEmail] = user;
+  } else {
+    user.fullName = fullName;
+    if (institution) user.institution = institution;
+    if (course) user.course = course;
+  }
+
+  saveAdminStore(adminStore);
+
+  res.json({
+    success: true,
+    profile: {
+      ...user,
+      firstName,
+      middleName,
+      lastName,
+      displayName,
+      institution,
+      course,
+      yearLevel,
+      phone,
+    },
+  });
 });
 
 // Vite middleware or production static serving

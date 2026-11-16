@@ -26,6 +26,8 @@ interface GuestShowcaseHeroProps {
   onBrowseDemo: () => void;
   onQuickDemoJuan: () => void;
   onQuickDemoMaria: () => void;
+  onOpenAdminLogin?: () => void;
+  onQuickDemoNoel?: () => void;
 }
 
 export const GuestShowcaseHero: React.FC<GuestShowcaseHeroProps> = ({
@@ -34,6 +36,8 @@ export const GuestShowcaseHero: React.FC<GuestShowcaseHeroProps> = ({
   onBrowseDemo,
   onQuickDemoJuan,
   onQuickDemoMaria,
+  onOpenAdminLogin,
+  onQuickDemoNoel,
 }) => {
   const [showDevDetails, setShowDevDetails] = useState(false);
   const isSupabaseReady = checkIsConfigured();
@@ -96,24 +100,44 @@ export const GuestShowcaseHero: React.FC<GuestShowcaseHeroProps> = ({
             </button>
           </div>
 
-          {/* 1-Click Quick Demo Profiles for Class Presentation */}
+          {/* 1-Click Quick Demo Profiles for Instant Inspection */}
           <div className="pt-4 border-t border-white/10 flex flex-col sm:flex-row sm:items-center gap-3 text-xs">
             <span className="text-sky-300/80 font-medium">Quick 1-Click Demo Profiles (For Instant Preview):</span>
-            <div className="flex items-center space-x-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={onQuickDemoJuan}
                 className="px-3 py-1.5 bg-white/10 hover:bg-white/20 border border-white/15 rounded-lg text-white font-semibold transition-colors flex items-center space-x-1.5 cursor-pointer"
               >
                 <span>Juan Dela Cruz</span>
-                <span className="text-[10px] text-sky-300 font-normal">(Retail Associate)</span>
+                <span className="text-[10px] text-sky-300 font-normal">(Student)</span>
               </button>
               <button
                 onClick={onQuickDemoMaria}
                 className="px-3 py-1.5 bg-white/10 hover:bg-white/20 border border-white/15 rounded-lg text-white font-semibold transition-colors flex items-center space-x-1.5 cursor-pointer"
               >
                 <span>Maria Santos</span>
-                <span className="text-[10px] text-sky-300 font-normal">(BPO Support)</span>
+                <span className="text-[10px] text-sky-300 font-normal">(Student)</span>
               </button>
+              {onQuickDemoNoel && (
+                <button
+                  onClick={onQuickDemoNoel}
+                  className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 rounded-lg text-amber-200 font-bold transition-colors flex items-center space-x-1.5 cursor-pointer"
+                  title="Test Root Super Administrator Privileges"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Noel Historillo</span>
+                  <span className="text-[10px] text-amber-300 font-bold">(Super Admin)</span>
+                </button>
+              )}
+              {onOpenAdminLogin && (
+                <button
+                  onClick={onOpenAdminLogin}
+                  className="px-3 py-1.5 bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-400/40 rounded-lg text-indigo-200 font-semibold transition-colors flex items-center space-x-1 cursor-pointer"
+                >
+                  <LogIn className="w-3.5 h-3.5" />
+                  <span>Admin Login</span>
+                </button>
+              )}
             </div>
           </div>
         </div>

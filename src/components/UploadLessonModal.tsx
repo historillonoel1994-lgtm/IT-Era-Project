@@ -44,6 +44,7 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
   onClose,
   onLessonUploaded,
 }) => {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isSubmittingRef = useRef(false);
   const [activeTab, setActiveTab] = useState<'upload' | 'samples'>('upload');
   const [file, setFile] = useState<File | null>(null);
@@ -60,6 +61,28 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
   const [uploadStatus, setUploadStatus] = useState<string>('');
   const [isSavedConfirmed, setIsSavedConfirmed] = useState<boolean>(false);
   const [showAllSamplesExpanded, setShowAllSamplesExpanded] = useState<boolean>(false);
+
+  const resetModalState = () => {
+    isSubmittingRef.current = false;
+    setActiveTab('upload');
+    setFile(null);
+    setTitle('');
+    setSubject('');
+    setLoading(false);
+    setError(null);
+    setExtractedPreview(null);
+    setUploadStatus('');
+    setIsSavedConfirmed(false);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const handleClose = () => {
+    if (loading) return;
+    resetModalState();
+    onClose();
+  };
 
   if (!isOpen) return null;
 
@@ -89,13 +112,21 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     setError(null);
+    setExtractedPreview(null);
+    setIsSavedConfirmed(false);
+    setUploadStatus('');
     const selectedFile = e.target.files?.[0];
     if (!selectedFile) return;
 
-    setFile(selectedFile);
-    if (!title) {
-      setTitle(selectedFile.name.replace(/\.[^/.]+$/, ''));
+    if (selectedFile.size > 35 * 1024 * 1024) {
+      setError('File size exceeds the 35MB direct extraction limit. Please compress or split the document.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
     }
+
+    const derivedTitle = selectedFile.name.replace(/\.[^/.]+$/, '');
+    setFile(selectedFile);
+    setTitle(derivedTitle);
     if (!subject) {
       setSubject('General College Course');
     }
@@ -106,7 +137,9 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
       reader.onload = async () => {
         try {
           const base64 = reader.result as string;
-          const parsed = await parseDocumentFile(base64, selectedFile.name, selectedFile.type);
+          const parsed = await parseDocumentFile(base64, selectedFile.name, selectedFile.type, {
+            title: derivedTitle,
+          });
           setExtractedPreview({
             totalPages: parsed.totalPages,
             pages: parsed.pages,
@@ -154,120 +187,111 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
       fileName: file?.name,
     };
 
-    // When a file is uploaded, enforce authenticated user save
-    if (file) {
+    // When a file is uploaded with Supabase configured & authenticated, persist to cloud vault too
+    if (file && checkIsConfigured()) {
       setLoading(true);
       setError(null);
       setIsSavedConfirmed(false);
-      setUploadStatus(`Authenticating student session...`);
+      setUploadStatus('Checking Supabase cloud session...');
 
-      // 1. AUTHENTICATED USER
       const {
         data: { user },
-        error: userError,
       } = await supabase.auth.getUser();
 
-      if (!user) {
-        setLoading(false);
-        isSubmittingRef.current = false;
-        setUploadStatus('');
-        setError('Please sign in to save your activity.');
-        return;
-      }
+      if (user) {
+        try {
+          await ensureUserProfileAndProgress(user);
+          setUploadStatus(`Uploading ${file.name} to ${STORAGE_BUCKET}...`);
 
-      try {
-        await ensureUserProfileAndProgress(user);
-        setUploadStatus(`Uploading ${file.name} to ${STORAGE_BUCKET}...`);
+          const cleanFileName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+          const storagePath = `${user.id}/${Date.now()}_${cleanFileName}`;
 
-        const cleanFileName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-        const storagePath = `${user.id}/${Date.now()}_${cleanFileName}`;
+          const { error: uploadError } = await supabase.storage
+            .from(STORAGE_BUCKET)
+            .upload(storagePath, file, {
+              cacheControl: '3600',
+              upsert: true,
+            });
 
-        // Upload to storage bucket
-        const { error: uploadError } = await supabase.storage
-          .from(STORAGE_BUCKET)
-          .upload(storagePath, file, {
-            cacheControl: '3600',
-            upsert: true,
-          });
+          if (uploadError) {
+            console.error('Storage upload failed:', uploadError);
+            setError(`Storage upload failed: ${uploadError.message}`);
+            setLoading(false);
+            isSubmittingRef.current = false;
+            setUploadStatus('');
+            return;
+          }
 
-        if (uploadError) {
-          console.error('Storage upload failed:', uploadError);
-          setError(`Storage upload failed: ${uploadError.message}`);
-          setLoading(false);
-          isSubmittingRef.current = false;
-          setUploadStatus('');
-          return;
-        }
+          setUploadStatus('Registering record in learning_materials...');
+          const { data: material, error: materialError } = await supabase
+            .from('learning_materials')
+            .insert({
+              user_id: user.id,
+              title: lessonTitle || file.name,
+              file_name: file.name,
+              file_path: storagePath,
+              total_pages: extractedPreview.totalPages || null,
+            })
+            .select()
+            .single();
 
-        // 2. LEARNING MATERIAL DATABASE SAVE
-        // Immediately insert its information into learning_materials
-        // Use exact existing columns: user_id, title, file_name, file_path, total_pages
-        setUploadStatus(`Registering record in learning_materials...`);
-        const { data: material, error: materialError } = await supabase
-          .from('learning_materials')
-          .insert({
-            user_id: user.id,
-            title: lessonTitle || file.name,
-            file_name: file.name,
-            file_path: storagePath,
-            total_pages: extractedPreview.totalPages || null,
-          })
-          .select()
-          .single();
+          if (materialError) {
+            console.error('Learning material database save failed:', materialError);
+            setError(`Learning material database save failed: ${materialError.message}`);
+            setIsSavedConfirmed(false);
+            setLoading(false);
+            isSubmittingRef.current = false;
+            setUploadStatus('');
+            return;
+          }
 
-        if (materialError) {
-          console.error(
-            'Learning material database save failed:',
-            materialError
-          );
-          console.error('Material DB error:', materialError);
-          setError(`Learning material database save failed: ${materialError.message}`);
+          if (material?.id) {
+            setCurrentLearningMaterialId(material.id);
+            newLesson.id = material.id;
+            newLesson.filePath = storagePath;
+          }
+
+          setIsSavedConfirmed(true);
+          setUploadStatus('Saved');
+        } catch (err: any) {
+          console.error('Learning material database save failed:', err);
+          setError(err.message || 'Failed to save learning material.');
           setIsSavedConfirmed(false);
           setLoading(false);
           isSubmittingRef.current = false;
           setUploadStatus('');
-          // DO NOT show "Saved".
           return;
         }
-
-        // If successful: store material.id as the current learning material ID.
-        if (material?.id) {
-          setCurrentLearningMaterialId(material.id);
-          newLesson.id = material.id;
-          newLesson.filePath = storagePath;
-        }
-
-        // Only display "Saved" after Supabase confirms the insert succeeded.
-        setIsSavedConfirmed(true);
-        setUploadStatus('Saved');
-        notifyDataChanged();
-      } catch (err: any) {
-        console.error('Learning material database save failed:', err);
-        console.error('Material DB error:', err);
-        setError(err.message || 'Failed to save learning material.');
-        setIsSavedConfirmed(false);
-        setLoading(false);
-        isSubmittingRef.current = false;
-        setUploadStatus('');
-        return;
-      } finally {
-        setLoading(false);
-        isSubmittingRef.current = false;
+      } else {
+        setUploadStatus('Saving extracted lesson to study workspace...');
       }
     }
 
-    addLesson(newLesson);
-    onLessonUploaded(newLesson);
+    try {
+      setLoading(true);
+      await addLesson(newLesson);
+      setIsSavedConfirmed(true);
+      setUploadStatus('Saved');
+      if (checkIsConfigured()) {
+        notifyDataChanged();
+      }
+      onLessonUploaded(newLesson);
+    } finally {
+      setLoading(false);
+      isSubmittingRef.current = false;
+    }
 
-    // Give visual confirmation of the Saved status before closing
+    // Give brief visual confirmation of the Saved status before closing and resetting form
     setTimeout(() => {
+      resetModalState();
       onClose();
-    }, 600);
+    }, 500);
   };
 
   const handleSelectSample = (sample: LessonDocument) => {
-    addLesson(sample);
+    void addLesson(sample);
     onLessonUploaded(sample);
+    resetModalState();
     onClose();
   };
 
@@ -291,7 +315,7 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
             </div>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
           >
             <X className="w-5 h-5" />
@@ -347,6 +371,7 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
               {/* Drop area */}
               <label className="border-2 border-dashed border-sky-300 hover:border-sky-500 bg-sky-50/40 hover:bg-sky-50/80 rounded-2xl p-6 text-center cursor-pointer transition-colors block">
                 <input
+                  ref={fileInputRef}
                   type="file"
                   accept=".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.csv,.tsv,.txt,.md,.markdown,.rtf"
                   onChange={handleFileChange}
@@ -360,7 +385,7 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
                     {file ? file.name : 'Click to select or drop your course material here'}
                   </span>
                   <span className="text-xs text-slate-500 mt-1">
-                    Accepts PDFs, Word docs, PowerPoint presentations, Excel spreadsheets, CSVs, and notes (up to 50MB)
+                    Accepts PDFs, Word docs, PowerPoint presentations, Excel spreadsheets, CSVs, and notes (up to 35MB)
                   </span>
                   {currentBadge && (
                     <span className={`mt-2 px-2.5 py-0.5 rounded-full text-xs font-semibold border ${currentBadge.color}`}>
@@ -563,7 +588,7 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
             </div>
             <div className="flex space-x-2 shrink-0">
               <button
-                onClick={onClose}
+                onClick={handleClose}
                 disabled={loading}
                 className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-800 rounded-xl cursor-pointer"
               >

@@ -1,6 +1,9 @@
 import {
   UserProfile,
   LessonDocument,
+  LessonPage,
+  DocumentChunk,
+  DocumentProcessingStatus,
   LessonSummary,
   QuizResult,
   WorkScheduleItem,
@@ -28,7 +31,14 @@ import {
   fetchStudentMaterials,
   fetchStudentQuizAttempts,
   fetchStudyProgressFromSupabase,
+  supabase,
+  STORAGE_BUCKET,
 } from '../lib/supabase';
+import {
+  storeDocumentContent,
+  fetchDocumentContent,
+  parseDocumentFile,
+} from './api';
 
 const KEYS = {
   USER: 'studybuddy_user_profile',
@@ -46,6 +56,8 @@ const KEYS = {
   REVIEWER_ATTEMPTS: 'studybuddy_reviewer_attempts',
   FLASHCARD_PROGRESS: 'studybuddy_flashcard_progress',
   MEMORIZATION_PROGRESS: 'studybuddy_memorization_progress',
+  DOCUMENTS_CONTENT: 'studybuddy_documents_content',
+  LAST_USER_ID: 'studybuddy_last_auth_user_id',
 };
 
 // Safe JSON parser
@@ -64,7 +76,61 @@ function safeSet<T>(key: string, value: T): void {
   try {
     localStorage.setItem(key, JSON.stringify(value));
   } catch (e) {
+    // Handle QuotaExceededError gracefully by evicting oldest cached document bodies
+    try {
+      const cachedDocs = safeGet<Record<string, StoredDocumentContentRecord>>(KEYS.DOCUMENTS_CONTENT, {});
+      const activeId = safeGet<string>(KEYS.ACTIVE_LESSON_ID, '');
+      const entries = Object.entries(cachedDocs).sort((a, b) => {
+        const ta = new Date(a[1]?.updatedAt || 0).getTime();
+        const tb = new Date(b[1]?.updatedAt || 0).getTime();
+        return ta - tb;
+      });
+      for (const [docKey] of entries) {
+        if (docKey === activeId) continue;
+        delete cachedDocs[docKey];
+        try {
+          localStorage.setItem(KEYS.DOCUMENTS_CONTENT, JSON.stringify(cachedDocs));
+          localStorage.setItem(key, JSON.stringify(value));
+          return;
+        } catch {
+          // Continue evicting
+        }
+      }
+    } catch {
+      // Ignore cleanup failure
+    }
     console.error(`Error saving ${key} to storage:`, e);
+  }
+}
+
+// Clear user-scoped data when switching to a different account or signing out
+export function resetUserScopedLocalData(nextUserId?: string): void {
+  try {
+    const prevUserId = localStorage.getItem(KEYS.LAST_USER_ID);
+    if (nextUserId && prevUserId === nextUserId) {
+      return;
+    }
+
+    localStorage.removeItem(KEYS.LESSONS);
+    localStorage.removeItem(KEYS.ACTIVE_LESSON_ID);
+    localStorage.removeItem(KEYS.SUMMARIES);
+    localStorage.removeItem(KEYS.QUIZ_RESULTS);
+    localStorage.removeItem(KEYS.PROGRESS);
+    localStorage.removeItem(KEYS.AUDIO_SESSIONS);
+    localStorage.removeItem(KEYS.REVIEWER_ATTEMPTS);
+    localStorage.removeItem(KEYS.FLASHCARD_PROGRESS);
+    localStorage.removeItem(KEYS.MEMORIZATION_PROGRESS);
+    localStorage.removeItem(KEYS.DOCUMENTS_CONTENT);
+    localStorage.removeItem('studybuddy_current_material_id');
+
+    if (nextUserId) {
+      localStorage.setItem(KEYS.LAST_USER_ID, nextUserId);
+    } else {
+      localStorage.removeItem(KEYS.LAST_USER_ID);
+      localStorage.removeItem(KEYS.USER);
+    }
+  } catch (e) {
+    console.warn('resetUserScopedLocalData warning:', e);
   }
 }
 
@@ -75,6 +141,11 @@ export function getUserProfile(): UserProfile {
 
 export function saveUserProfile(user: UserProfile): void {
   safeSet(KEYS.USER, user);
+  try {
+    if (user?.id) {
+      localStorage.setItem(KEYS.LAST_USER_ID, user.id);
+    }
+  } catch {}
 }
 
 export function isLoggedIn(): boolean {
@@ -85,15 +156,132 @@ export function setLoggedIn(status: boolean): void {
   safeSet(KEYS.AUTH_LOGGED_IN, status);
 }
 
+// ==========================================
+// DOCUMENT CONTENT PERSISTENCE & RECONSTRUCTION
+// ==========================================
+
+export interface StoredDocumentContentRecord {
+  id: string;
+  title?: string;
+  fileName?: string;
+  filePath?: string;
+  fileType?: string;
+  totalPages?: number;
+  pages: LessonPage[];
+  chunks?: DocumentChunk[];
+  processingStatus?: DocumentProcessingStatus;
+  statusMessage?: string;
+  updatedAt: string;
+}
+
+export function isPlaceholderContent(pages?: LessonPage[]): boolean {
+  if (!pages || pages.length === 0) return true;
+  if (pages.length === 1) {
+    const text = (pages[0].text || '').trim().toLowerCase();
+    if (!text) return true;
+    if (text.startsWith('[document:') && text.includes('stored path:')) return true;
+    if (
+      text.includes('could not be completely extracted') ||
+      text.includes('no readable text content found') ||
+      text.includes('no readable text extracted') ||
+      text.includes('no text extracted from') ||
+      text.includes('contains no readable rows')
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function saveDocumentFullContent(
+  id: string,
+  content: {
+    pages: LessonPage[];
+    chunks?: DocumentChunk[];
+    totalPages?: number;
+    title?: string;
+    fileName?: string;
+    filePath?: string;
+    fileType?: string;
+  },
+  syncToServer: boolean = true
+): Promise<boolean> {
+  if (!id || isPlaceholderContent(content.pages)) return Promise.resolve(false);
+
+  // Store each full document ONCE under its canonical ID (and strip any legacy file:/path: duplicate entries)
+  const rawDocs = safeGet<Record<string, StoredDocumentContentRecord>>(KEYS.DOCUMENTS_CONTENT, {});
+  const cleanDocs: Record<string, StoredDocumentContentRecord> = {};
+  for (const [k, v] of Object.entries(rawDocs)) {
+    if (!k.startsWith('file:') && !k.startsWith('path:')) {
+      cleanDocs[k] = v;
+    }
+  }
+
+  cleanDocs[id] = {
+    id,
+    title: content.title,
+    fileName: content.fileName,
+    filePath: content.filePath,
+    fileType: content.fileType,
+    totalPages: content.totalPages || content.pages.length,
+    pages: content.pages,
+    chunks: content.chunks,
+    processingStatus: 'ready',
+    statusMessage: 'Ready',
+    updatedAt: new Date().toISOString(),
+  };
+
+  safeSet(KEYS.DOCUMENTS_CONTENT, cleanDocs);
+
+  if (!syncToServer) return Promise.resolve(true);
+
+  return storeDocumentContent({
+    id,
+    title: content.title || content.fileName || 'Learning Material',
+    filename: content.fileName || id,
+    filePath: content.filePath,
+    fileType: content.fileType,
+    totalPages: content.totalPages || content.pages.length,
+    pages: content.pages,
+    chunks: content.chunks,
+    processingStatus: 'ready',
+  })
+    .then(() => true)
+    .catch((err) => {
+      console.warn('Server document store notice:', err.message);
+      return false;
+    });
+}
+
+export function getDocumentFullContent(idOrKey: string): StoredDocumentContentRecord | null {
+  if (!idOrKey) return null;
+  const allDocs = safeGet<Record<string, StoredDocumentContentRecord>>(KEYS.DOCUMENTS_CONTENT, {});
+  if (allDocs[idOrKey]) return allDocs[idOrKey];
+  const keyLow = idOrKey.toLowerCase();
+  if (allDocs[`file:${keyLow}`]) return allDocs[`file:${keyLow}`];
+  if (allDocs[`path:${idOrKey}`]) return allDocs[`path:${idOrKey}`];
+
+  return (
+    Object.values(allDocs).find(
+      (d) =>
+        d.id === idOrKey ||
+        (d.fileName && d.fileName.toLowerCase() === keyLow) ||
+        (d.filePath && d.filePath === idOrKey)
+    ) || null
+  );
+}
+
 // Lessons Management
 export function getStoredLessons(): LessonDocument[] {
   const lessons = safeGet<LessonDocument[]>(KEYS.LESSONS, []);
-  if (lessons.length === 0) {
+  let list = lessons;
+  if (list.length === 0) {
     safeSet(KEYS.LESSONS, DEFAULT_LESSONS);
-    return DEFAULT_LESSONS;
+    list = DEFAULT_LESSONS;
   }
-  // Ensure all DEFAULT_LESSONS exist in the list so new samples are always accessible
-  let merged = [...lessons];
+
+  // Ensure all DEFAULT_LESSONS exist in the list
+  let merged = [...list];
   let changed = false;
   for (const def of DEFAULT_LESSONS) {
     if (!merged.some((l) => l.id === def.id)) {
@@ -101,24 +289,308 @@ export function getStoredLessons(): LessonDocument[] {
       changed = true;
     }
   }
+
+  // Reconstruct full pages from local document content cache when missing (pure read, zero HTTP side-effects)
+  merged = merged.map((lesson) => {
+    if (lesson.isSample) {
+      return {
+        ...lesson,
+        processingStatus: 'ready',
+      };
+    }
+
+    if (!isPlaceholderContent(lesson.pages)) {
+      return {
+        ...lesson,
+        processingStatus: lesson.processingStatus || 'ready',
+      };
+    }
+
+    const cached =
+      getDocumentFullContent(lesson.id) ||
+      (lesson.filePath ? getDocumentFullContent(lesson.filePath) : null) ||
+      (lesson.fileName ? getDocumentFullContent(lesson.fileName) : null);
+
+    if (cached && cached.pages && !isPlaceholderContent(cached.pages)) {
+      changed = true;
+      return {
+        ...lesson,
+        pages: cached.pages,
+        chunks: cached.chunks || lesson.chunks,
+        totalPages: cached.totalPages || lesson.totalPages,
+        processingStatus: 'ready',
+        statusMessage: 'Ready',
+      };
+    }
+
+    return {
+      ...lesson,
+      processingStatus: lesson.processingStatus || 'reprocessing_required',
+      statusMessage: 'This learning material needs to be processed again to access its complete content.',
+    };
+  });
+
   if (changed) {
     safeSet(KEYS.LESSONS, merged);
   }
   return merged;
 }
 
-export function saveStoredLessons(lessons: LessonDocument[]): void {
+export function saveStoredLessons(lessons: LessonDocument[], syncToServer: boolean = false): void {
+  for (const l of lessons) {
+    if (!l.isSample && !isPlaceholderContent(l.pages)) {
+      void saveDocumentFullContent(l.id, l, syncToServer);
+    }
+  }
   safeSet(KEYS.LESSONS, lessons);
 }
 
-export function addLesson(lesson: LessonDocument): void {
+export function addLesson(lesson: LessonDocument): Promise<boolean> {
   const current = getStoredLessons();
-  const updated = [lesson, ...current.filter((l) => l.id !== lesson.id)];
-  saveStoredLessons(updated);
+  const readyLesson: LessonDocument = {
+    ...lesson,
+    processingStatus: isPlaceholderContent(lesson.pages) ? 'reprocessing_required' : 'ready',
+  };
+  let persistPromise: Promise<boolean> = Promise.resolve(true);
+  if (!lesson.isSample && !isPlaceholderContent(lesson.pages)) {
+    persistPromise = saveDocumentFullContent(lesson.id, readyLesson, true);
+  }
+  const updated = [readyLesson, ...current.filter((l) => l.id !== lesson.id)];
+  safeSet(KEYS.LESSONS, updated);
   setActiveLessonId(lesson.id);
 
   // Update progress
   updateProgress({ lessonsReviewed: getStudentProgress().lessonsReviewed + 1 });
+  return persistPromise;
+}
+
+/**
+ * Reconstructs complete extracted document content from backend/database/storage
+ * Ensures full document access when selecting saved documents.
+ * Supports passing either a lessonId or a partial lesson object.
+ */
+export async function loadAndReconstructLesson(
+  lessonIdOrMat: string | Partial<LessonDocument>,
+  options?: { forceReprocess?: boolean }
+): Promise<LessonDocument> {
+  const lessons = getStoredLessons();
+  const searchKey = typeof lessonIdOrMat === 'string' ? lessonIdOrMat : (lessonIdOrMat.id || lessonIdOrMat.fileName || '');
+  const baseObj = typeof lessonIdOrMat === 'object' ? lessonIdOrMat : null;
+
+  let found = lessons.find(
+    (l) => l.id === searchKey || (l.fileName && l.fileName === searchKey) || (l.title && l.title === searchKey)
+  );
+
+  if (!found && baseObj) {
+    found = {
+      id: baseObj.id || `doc-${Date.now()}`,
+      title: baseObj.title || baseObj.fileName || 'Learning Material',
+      subject: baseObj.subject || 'Course Material',
+      totalPages: baseObj.totalPages || 1,
+      uploadedAt: baseObj.uploadedAt || new Date().toISOString(),
+      pages: baseObj.pages || [{ pageNumber: 1, text: '' }],
+      fileName: baseObj.fileName,
+      filePath: baseObj.filePath,
+      fileType: baseObj.fileType || 'pdf',
+      isSample: false,
+      processingStatus: 'processing',
+    };
+  }
+
+  // 1. If already complete and not forcing reprocess, return immediately
+  if (found && !options?.forceReprocess && !isPlaceholderContent(found.pages)) {
+    // Ensure pages are sorted in natural numerical order
+    const sortedPages = [...found.pages].sort((a, b) => {
+      const numA = typeof a.pageNumber === 'number' ? a.pageNumber : parseInt(String(a.pageNumber), 10) || 0;
+      const numB = typeof b.pageNumber === 'number' ? b.pageNumber : parseInt(String(b.pageNumber), 10) || 0;
+      return numA - numB;
+    });
+    return {
+      ...found,
+      pages: sortedPages,
+      processingStatus: 'ready',
+      statusMessage: 'Ready',
+    };
+  }
+
+  const lookupIds = [
+    searchKey,
+    found?.id,
+    found?.fileName,
+    found?.filePath,
+    found?.title,
+  ].filter(Boolean) as string[];
+
+  // 2. Check local full document content cache
+  if (!options?.forceReprocess) {
+    for (const key of lookupIds) {
+      const localCached = getDocumentFullContent(key);
+      if (localCached && localCached.pages && !isPlaceholderContent(localCached.pages)) {
+        const sortedPages = [...localCached.pages].sort((a, b) => {
+          const numA = typeof a.pageNumber === 'number' ? a.pageNumber : parseInt(String(a.pageNumber), 10) || 0;
+          const numB = typeof b.pageNumber === 'number' ? b.pageNumber : parseInt(String(b.pageNumber), 10) || 0;
+          return numA - numB;
+        });
+
+        const updated: LessonDocument = {
+          id: found?.id || localCached.id,
+          title: found?.title || localCached.title || 'Learning Material',
+          subject: found?.subject || 'Course Material',
+          totalPages: localCached.totalPages || sortedPages.length,
+          uploadedAt: found?.uploadedAt || new Date().toISOString(),
+          fileName: found?.fileName || localCached.fileName,
+          filePath: found?.filePath || localCached.filePath,
+          fileType: found?.fileType || localCached.fileType || 'pdf',
+          pages: sortedPages,
+          chunks: localCached.chunks || found?.chunks,
+          processingStatus: 'ready',
+          statusMessage: 'Ready',
+          isSample: found?.isSample || false,
+        };
+
+        const existingIdx = lessons.findIndex((l) => l.id === updated.id);
+        const newLessons = existingIdx >= 0
+          ? lessons.map((l) => (l.id === updated.id ? updated : l))
+          : [updated, ...lessons];
+        saveStoredLessons(newLessons);
+        return updated;
+      }
+    }
+  }
+
+  // 3. Try to fetch complete content from server document store
+  for (const key of lookupIds) {
+    try {
+      const serverRes = await fetchDocumentContent(key);
+      if (serverRes.success && serverRes.document && !isPlaceholderContent(serverRes.document.pages)) {
+        const doc = serverRes.document;
+        const sortedPages = [...doc.pages].sort((a: any, b: any) => {
+          const numA = typeof a.pageNumber === 'number' ? a.pageNumber : parseInt(String(a.pageNumber), 10) || 0;
+          const numB = typeof b.pageNumber === 'number' ? b.pageNumber : parseInt(String(b.pageNumber), 10) || 0;
+          return numA - numB;
+        });
+
+        const updated: LessonDocument = {
+          id: found?.id || doc.id,
+          title: found?.title || doc.title || 'Learning Material',
+          subject: found?.subject || 'Course Material',
+          totalPages: doc.totalPages || sortedPages.length,
+          uploadedAt: found?.uploadedAt || new Date().toISOString(),
+          fileName: found?.fileName || doc.filename,
+          filePath: found?.filePath || doc.filePath,
+          fileType: found?.fileType || doc.fileType || 'pdf',
+          pages: sortedPages,
+          chunks: doc.chunks || found?.chunks,
+          processingStatus: 'ready',
+          statusMessage: 'Ready',
+          isSample: found?.isSample || false,
+        };
+
+        saveDocumentFullContent(updated.id, updated);
+        const existingIdx = lessons.findIndex((l) => l.id === updated.id);
+        const newLessons = existingIdx >= 0
+          ? lessons.map((l) => (l.id === updated.id ? updated : l))
+          : [updated, ...lessons];
+        saveStoredLessons(newLessons);
+        return updated;
+      }
+    } catch {
+      // Continue to next recovery candidate
+    }
+  }
+
+  // 4. If document has a file in Supabase Storage, download and reprocess
+  const storagePath = found?.filePath || (found?.fileName ? `materials/${found.fileName}` : null);
+  if (storagePath && checkIsConfigured()) {
+    try {
+      const { data: fileBlob, error: downloadError } = await supabase.storage
+        .from(STORAGE_BUCKET)
+        .download(storagePath);
+
+      if (!downloadError && fileBlob) {
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(fileBlob);
+        });
+
+        const parsed = await parseDocumentFile(
+          base64,
+          found?.fileName || found?.title || 'document',
+          found?.fileType,
+          {
+            documentId: found?.id,
+            title: found?.title,
+            filePath: storagePath,
+          }
+        );
+
+        if (parsed && parsed.pages && parsed.pages.length > 0 && !isPlaceholderContent(parsed.pages)) {
+          const sortedPages = [...parsed.pages].sort((a, b) => {
+            const numA = typeof a.pageNumber === 'number' ? a.pageNumber : parseInt(String(a.pageNumber), 10) || 0;
+            const numB = typeof b.pageNumber === 'number' ? b.pageNumber : parseInt(String(b.pageNumber), 10) || 0;
+            return numA - numB;
+          });
+
+          const updated: LessonDocument = {
+            id: found?.id || `doc-${Date.now()}`,
+            title: found?.title || 'Learning Material',
+            subject: found?.subject || 'Course Material',
+            totalPages: parsed.totalPages || sortedPages.length,
+            uploadedAt: found?.uploadedAt || new Date().toISOString(),
+            fileName: found?.fileName,
+            filePath: found?.filePath || storagePath,
+            fileType: found?.fileType || parsed.fileType || 'pdf',
+            pages: sortedPages,
+            chunks: parsed.chunks || [],
+            processingStatus: 'ready',
+            statusMessage: 'Ready',
+            isSample: false,
+          };
+
+          await saveDocumentFullContent(updated.id, updated, true);
+          const existingIdx = lessons.findIndex((l) => l.id === updated.id);
+          const newLessons = existingIdx >= 0
+            ? lessons.map((l) => (l.id === updated.id ? updated : l))
+            : [updated, ...lessons];
+          saveStoredLessons(newLessons);
+          return updated;
+        }
+      }
+    } catch (err: any) {
+      console.warn('Reprocess from Supabase storage failed:', err);
+    }
+  }
+
+  // 5. Fallback: if cannot reprocess automatically, set state to reprocessing_required
+  const targetId = found?.id || searchKey || `doc-${Date.now()}`;
+  const updatedFail: LessonDocument = {
+    id: targetId,
+    title: found?.title || 'Learning Material',
+    subject: found?.subject || 'Course Material',
+    totalPages: found?.totalPages || 1,
+    uploadedAt: found?.uploadedAt || new Date().toISOString(),
+    fileName: found?.fileName,
+    filePath: found?.filePath,
+    fileType: found?.fileType || 'pdf',
+    pages: found?.pages || [
+      {
+        pageNumber: 1,
+        text: `[Document: ${found?.title || 'Learning Material'}]\nStored path: ${found?.filePath || 'saved in vault'}.`,
+      },
+    ],
+    processingStatus: 'reprocessing_required',
+    statusMessage: 'This learning material needs to be processed again to access its complete content.',
+    isSample: false,
+  };
+
+  const existingIdx = lessons.findIndex((l) => l.id === updatedFail.id);
+  const newLessons = existingIdx >= 0
+    ? lessons.map((l) => (l.id === updatedFail.id ? updatedFail : l))
+    : [updatedFail, ...lessons];
+  saveStoredLessons(newLessons);
+  return updatedFail;
 }
 
 export function getActiveLessonId(): string {
@@ -273,9 +745,79 @@ export async function syncUserDataFromSupabase(userId: string): Promise<void> {
     if (remoteMaterialsRes.data && remoteMaterialsRes.data.length > 0) {
       const existing = getStoredLessons();
       const nonUserSamples = existing.filter((l) => l.isSample);
-      const merged = [...remoteMaterialsRes.data, ...nonUserSamples];
+
+      // Preserve complete extracted content for every material (checking local cache + server store)
+      const resolvedRemote = await Promise.all(
+        remoteMaterialsRes.data.map(async (remoteMat) => {
+          // 1. Check existing in local lessons
+          const existingMatch = existing.find(
+            (l) =>
+              l.id === remoteMat.id ||
+              (l.filePath && remoteMat.filePath && l.filePath === remoteMat.filePath) ||
+              (l.fileName && remoteMat.fileName && l.fileName === remoteMat.fileName)
+          );
+          if (existingMatch && !isPlaceholderContent(existingMatch.pages)) {
+            return {
+              ...remoteMat,
+              pages: existingMatch.pages,
+              chunks: existingMatch.chunks || remoteMat.chunks,
+              totalPages: existingMatch.totalPages || remoteMat.totalPages,
+              processingStatus: 'ready' as DocumentProcessingStatus,
+              statusMessage: 'Ready',
+            };
+          }
+
+          // 2. Check dedicated local document content cache
+          const cached =
+            getDocumentFullContent(remoteMat.id) ||
+            (remoteMat.filePath ? getDocumentFullContent(remoteMat.filePath) : null) ||
+            (remoteMat.fileName ? getDocumentFullContent(remoteMat.fileName) : null);
+          if (cached && cached.pages && !isPlaceholderContent(cached.pages)) {
+            return {
+              ...remoteMat,
+              pages: cached.pages,
+              chunks: cached.chunks || remoteMat.chunks,
+              totalPages: cached.totalPages || remoteMat.totalPages,
+              processingStatus: 'ready' as DocumentProcessingStatus,
+              statusMessage: 'Ready',
+            };
+          }
+
+          // 3. Check persistent server document store
+          const candidateKeys = [remoteMat.id, remoteMat.filePath, remoteMat.fileName].filter(Boolean) as string[];
+          for (const key of candidateKeys) {
+            try {
+              const serverRes = await fetchDocumentContent(key);
+              if (serverRes.success && serverRes.document && !isPlaceholderContent(serverRes.document.pages)) {
+                const doc = serverRes.document;
+                const hydrated: LessonDocument = {
+                  ...remoteMat,
+                  pages: doc.pages,
+                  chunks: doc.chunks || remoteMat.chunks,
+                  totalPages: doc.totalPages || doc.pages.length || remoteMat.totalPages,
+                  processingStatus: 'ready' as DocumentProcessingStatus,
+                  statusMessage: 'Ready',
+                };
+                void saveDocumentFullContent(hydrated.id, hydrated, false);
+                return hydrated;
+              }
+            } catch {
+              // Continue to next lookup key
+            }
+          }
+
+          // 4. Needs automatic or manual reprocessing
+          return {
+            ...remoteMat,
+            processingStatus: 'reprocessing_required' as DocumentProcessingStatus,
+            statusMessage: 'This learning material needs to be processed again to access its complete content.',
+          };
+        })
+      );
+
+      const merged = [...resolvedRemote, ...nonUserSamples];
       saveStoredLessons(merged);
-      setActiveLessonId(remoteMaterialsRes.data[0].id);
+      setActiveLessonId(resolvedRemote[0]?.id || merged[0]?.id);
     }
 
     // 2. Fetch quiz attempts from quiz_attempts

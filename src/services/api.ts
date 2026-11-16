@@ -4,6 +4,9 @@ export interface SummarizeParams {
   pages: { pageNumber: number | string; text: string }[];
   lessonTitle: string;
   subject?: string;
+  lessonId?: string;
+  documentId?: string;
+  filename?: string;
 }
 
 export interface QuizParams {
@@ -11,6 +14,9 @@ export interface QuizParams {
   lessonTitle: string;
   questionCount: 5 | 10 | 15;
   quizType: 'multiple_choice' | 'true_false' | 'mixed';
+  lessonId?: string;
+  documentId?: string;
+  filename?: string;
 }
 
 export interface AskTutorParams {
@@ -19,6 +25,9 @@ export interface AskTutorParams {
   question: string;
   chatHistory?: { sender: 'user' | 'tutor'; text: string }[];
   tutorMode?: 'materials' | 'feynman' | 'general';
+  lessonId?: string;
+  documentId?: string;
+  filename?: string;
 }
 
 export interface StudyPlanParams {
@@ -187,12 +196,20 @@ export interface ParsedDocumentResult {
 export async function parseDocumentFile(
   base64: string,
   filename: string,
-  fileType?: string
+  fileType?: string,
+  metadata?: { documentId?: string; title?: string; filePath?: string }
 ): Promise<ParsedDocumentResult> {
   const response = await fetch('/api/parse-document', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fileBase64: base64, filename, fileType }),
+    body: JSON.stringify({
+      fileBase64: base64,
+      filename,
+      fileType,
+      documentId: metadata?.documentId,
+      title: metadata?.title,
+      filePath: metadata?.filePath,
+    }),
   });
 
   if (!response.ok) {
@@ -205,6 +222,61 @@ export async function parseDocumentFile(
 
 export async function parsePdfFile(base64: string, filename: string): Promise<ParsedDocumentResult> {
   return parseDocumentFile(base64, filename, 'pdf');
+}
+
+export async function storeDocumentContent(docData: {
+  id: string;
+  documentId?: string;
+  title: string;
+  filename: string;
+  filePath?: string;
+  fileType?: string;
+  totalPages: number;
+  pages: { pageNumber: number | string; text: string; sectionTitle?: string }[];
+  chunks?: DocumentChunk[];
+  processingStatus?: 'ready' | 'processing' | 'processing_failed' | 'reprocessing_required';
+  statusMessage?: string;
+}): Promise<{ success: boolean; document: any }> {
+  const response = await fetch('/api/documents/store', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(docData),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to save document content to server.');
+  }
+
+  return response.json();
+}
+
+export async function fetchDocumentContent(id: string): Promise<{ success: boolean; document: any }> {
+  const response = await fetch(`/api/documents/${encodeURIComponent(id)}`);
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.message || errorData.error || 'Document content not found.');
+  }
+
+  return response.json();
+}
+
+export async function reprocessDocument(
+  id: string,
+  params?: { fileBase64?: string; filename?: string; fileType?: string; title?: string }
+): Promise<{ success: boolean; document: any; message?: string }> {
+  const response = await fetch(`/api/documents/${encodeURIComponent(id)}/reprocess`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params || {}),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.message || errorData.error || 'Reprocessing failed.');
+  }
+
+  return response.json();
 }
 
 // ==========================================
@@ -252,6 +324,9 @@ export async function explainUnfamiliarTerm(params: {
 export async function analyzeDocumentChapters(params: {
   pages: { pageNumber: number | string; text: string }[];
   lessonTitle: string;
+  lessonId?: string;
+  documentId?: string;
+  filename?: string;
 }): Promise<DocumentChapter[]> {
   const response = await fetch('/api/analyze-chapters', {
     method: 'POST',
@@ -277,6 +352,9 @@ export interface ReviewerGenerateParams {
   questionCount: number;
   difficulty: ReviewerDifficulty;
   questionTypes: string;
+  lessonId?: string;
+  documentId?: string;
+  filename?: string;
 }
 
 export interface ReviewerGenerateResult {
@@ -308,6 +386,9 @@ export async function generateFlashcards(params: {
   pages: { pageNumber: number | string; text: string }[];
   lessonTitle: string;
   chapterId?: string;
+  lessonId?: string;
+  documentId?: string;
+  filename?: string;
 }): Promise<FlashcardItem[]> {
   const response = await fetch('/api/generate-flashcards', {
     method: 'POST',
@@ -327,6 +408,9 @@ export async function generateFlashcards(params: {
 export async function generateConceptContrasts(params: {
   pages: { pageNumber: number | string; text: string }[];
   lessonTitle: string;
+  lessonId?: string;
+  documentId?: string;
+  filename?: string;
 }): Promise<ConceptContrastItem[]> {
   const response = await fetch('/api/generate-contrasts', {
     method: 'POST',

@@ -27,6 +27,7 @@ import {
   buildPageAudioText,
   buildExplanatoryPageAudioText,
   cleanTextForSpeech,
+  ONE_TIME_AUDIO_INTRO,
 } from '../services/speech';
 
 interface FullLessonAudioPlayerProps {
@@ -61,6 +62,7 @@ export const FullLessonAudioPlayer: React.FC<FullLessonAudioPlayerProps> = ({
   const narrationStyleRef = useRef(narrationStyle);
   narrationStyleRef.current = narrationStyle;
   const isManualStopRef = useRef(false);
+  const hasSpokenIntroRef = useRef(false);
 
   const pages = lesson.pages && lesson.pages.length > 0
     ? lesson.pages
@@ -97,6 +99,7 @@ export const FullLessonAudioPlayer: React.FC<FullLessonAudioPlayerProps> = ({
 
   // Clean up on unmount or lesson change
   useEffect(() => {
+    hasSpokenIntroRef.current = false;
     return () => {
       isManualStopRef.current = true;
       speechController.stop();
@@ -107,21 +110,33 @@ export const FullLessonAudioPlayer: React.FC<FullLessonAudioPlayerProps> = ({
     return null;
   }
 
-  const playFullPage = (index: number, overrideStyle?: 'explanatory' | 'verbatim') => {
+  const playFullPage = (
+    index: number,
+    overrideStyle?: 'explanatory' | 'verbatim',
+    isSessionStart: boolean = false
+  ) => {
     if (index < 0 || index >= pages.length) return;
     isManualStopRef.current = false;
     const pageToPlay = pages[index];
     const activeStyle = overrideStyle || narrationStyleRef.current;
+
+    // The AI introduction must be spoken ONLY ONCE when the audio lesson begins
+    const shouldIncludeIntro = (isSessionStart || !hasSpokenIntroRef.current) && index === 0;
+    if (shouldIncludeIntro) {
+      hasSpokenIntroRef.current = true;
+    }
+
     const pageSpeechText = buildPageAudioText(
       pageToPlay.pageNumber,
       totalPages,
       pageToPlay.text,
       activeStyle,
       lesson.title,
-      lesson.subject
+      lesson.subject,
+      { includeOpeningIntro: shouldIncludeIntro }
     );
 
-    const speechId = `full-lesson-${lesson.id}-p${pageToPlay.pageNumber}-${activeStyle}`;
+    const speechId = `full-lesson-${lesson.id}-p${pageToPlay.pageNumber}-${activeStyle}-${shouldIncludeIntro ? 'with-intro' : 'no-intro'}`;
 
     speechController.speak(speechId, pageSpeechText, {
       rate: speedRef.current,
@@ -137,14 +152,14 @@ export const FullLessonAudioPlayer: React.FC<FullLessonAudioPlayerProps> = ({
           return;
         }
 
-        // Auto-advance to next page if continuous play is enabled
+        // Auto-advance to next page if continuous play is enabled - never repeat opening intro
         if (audioModeRef.current === 'full' && continuousPlayRef.current) {
           if (currentPageIndexRef.current < pages.length - 1) {
             const nextIdx = currentPageIndexRef.current + 1;
             setCurrentPageIndex(nextIdx);
             setTimeout(() => {
-              playFullPage(nextIdx, activeStyle);
-            }, 500);
+              playFullPage(nextIdx, activeStyle, false);
+            }, 400);
           } else {
             setIsPlaying(false);
             setIsPaused(false);
@@ -215,7 +230,8 @@ export const FullLessonAudioPlayer: React.FC<FullLessonAudioPlayerProps> = ({
       setIsPlaying(true);
     } else {
       if (audioMode === 'full') {
-        playFullPage(currentPageIndex);
+        const isSessionStart = !hasSpokenIntroRef.current && currentPageIndex === 0;
+        playFullPage(currentPageIndex, undefined, isSessionStart);
       } else {
         playSummaryAudio();
       }
@@ -234,7 +250,7 @@ export const FullLessonAudioPlayer: React.FC<FullLessonAudioPlayerProps> = ({
       const nextIdx = currentPageIndex + 1;
       setCurrentPageIndex(nextIdx);
       if (isPlaying || isPaused) {
-        playFullPage(nextIdx);
+        playFullPage(nextIdx, undefined, false);
       }
     }
   };
@@ -244,7 +260,7 @@ export const FullLessonAudioPlayer: React.FC<FullLessonAudioPlayerProps> = ({
       const prevIdx = currentPageIndex - 1;
       setCurrentPageIndex(prevIdx);
       if (isPlaying || isPaused) {
-        playFullPage(prevIdx);
+        playFullPage(prevIdx, undefined, false);
       }
     }
   };
@@ -252,7 +268,7 @@ export const FullLessonAudioPlayer: React.FC<FullLessonAudioPlayerProps> = ({
   const handleSelectPage = (index: number) => {
     setCurrentPageIndex(index);
     if (isPlaying || isPaused) {
-      playFullPage(index);
+      playFullPage(index, undefined, false);
     }
   };
 

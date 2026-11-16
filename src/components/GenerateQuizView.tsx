@@ -9,6 +9,7 @@ import {
   Award,
   ChevronRight,
   AlertCircle,
+  AlertTriangle,
   Sliders,
   BookmarkCheck,
   Check,
@@ -62,6 +63,8 @@ import {
   getMemorizationProgress,
   saveMemorizationProgress,
   getStudentProgress,
+  loadAndReconstructLesson,
+  isPlaceholderContent,
 } from '../services/storage';
 import { SAMPLE_EXAM_TAKES } from '../data/precomputedData';
 import {
@@ -241,12 +244,27 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
 
     // Attempt AI-driven chapter analysis in background to extract refined syllabus titles
     const fetchChapters = async () => {
-      if (!currentTargetLesson.pages || currentTargetLesson.pages.length === 0) return;
+      let targetDoc = currentTargetLesson;
+      if (isPlaceholderContent(targetDoc.pages) || targetDoc.processingStatus === 'reprocessing_required') {
+        try {
+          const reconstructed = await loadAndReconstructLesson(targetDoc.id);
+          if (isMounted && !isPlaceholderContent(reconstructed.pages)) {
+            targetDoc = reconstructed;
+            if (onSelectLesson) onSelectLesson(reconstructed);
+          }
+        } catch {
+          return;
+        }
+      }
+      if (!targetDoc.pages || targetDoc.pages.length === 0 || isPlaceholderContent(targetDoc.pages)) return;
       setIsAnalyzingChapters(true);
       try {
         const analyzed = await analyzeDocumentChapters({
-          pages: currentTargetLesson.pages,
-          lessonTitle: currentTargetLesson.title,
+          pages: targetDoc.pages,
+          lessonTitle: targetDoc.title,
+          lessonId: targetDoc.id,
+          documentId: targetDoc.id,
+          filename: targetDoc.fileName,
         });
         if (isMounted && analyzed && analyzed.length > 0) {
           setDetectedChapters(analyzed);
@@ -267,25 +285,33 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [currentTargetLesson.id]);
+  }, [currentTargetLesson.id, currentTargetLesson.pages, currentTargetLesson.processingStatus]);
 
   // Load flashcards when Flashcards tab is opened
   useEffect(() => {
     if (activeReviewerTab === 'flashcards' && flashcards.length === 0) {
       let isMounted = true;
       setIsLoadingFlashcards(true);
-      generateFlashcards({
-        pages: currentTargetLesson.pages,
-        lessonTitle: currentTargetLesson.title,
-      })
-        .then((cards) => {
-          if (isMounted && cards && cards.length > 0) {
-            setFlashcards(cards);
-          }
-        })
-        .catch(() => {
-          // Keep default fallback cards
-        })
+      (async () => {
+        let targetDoc = currentTargetLesson;
+        if (isPlaceholderContent(targetDoc.pages)) {
+          try {
+            targetDoc = await loadAndReconstructLesson(targetDoc.id);
+          } catch {}
+        }
+        if (isPlaceholderContent(targetDoc.pages)) return;
+        const cards = await generateFlashcards({
+          pages: targetDoc.pages,
+          lessonTitle: targetDoc.title,
+          lessonId: targetDoc.id,
+          documentId: targetDoc.id,
+          filename: targetDoc.fileName,
+        });
+        if (isMounted && cards && cards.length > 0) {
+          setFlashcards(cards);
+        }
+      })()
+        .catch(() => {})
         .finally(() => {
           if (isMounted) setIsLoadingFlashcards(false);
         });
@@ -293,22 +319,32 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
         isMounted = false;
       };
     }
-  }, [activeReviewerTab, currentTargetLesson.id]);
+  }, [activeReviewerTab, currentTargetLesson.id, currentTargetLesson.pages, currentTargetLesson.processingStatus]);
 
   // Load concept contrasts when Contrasts tab is opened
   useEffect(() => {
     if (activeReviewerTab === 'contrasts' && contrasts.length === 0) {
       let isMounted = true;
       setIsLoadingContrasts(true);
-      generateConceptContrasts({
-        pages: currentTargetLesson.pages,
-        lessonTitle: currentTargetLesson.title,
-      })
-        .then((items) => {
-          if (isMounted && items && items.length > 0) {
-            setContrasts(items);
-          }
-        })
+      (async () => {
+        let targetDoc = currentTargetLesson;
+        if (isPlaceholderContent(targetDoc.pages)) {
+          try {
+            targetDoc = await loadAndReconstructLesson(targetDoc.id);
+          } catch {}
+        }
+        if (isPlaceholderContent(targetDoc.pages)) return;
+        const items = await generateConceptContrasts({
+          pages: targetDoc.pages,
+          lessonTitle: targetDoc.title,
+          lessonId: targetDoc.id,
+          documentId: targetDoc.id,
+          filename: targetDoc.fileName,
+        });
+        if (isMounted && items && items.length > 0) {
+          setContrasts(items);
+        }
+      })()
         .catch(() => {})
         .finally(() => {
           if (isMounted) setIsLoadingContrasts(false);
@@ -317,7 +353,7 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
         isMounted = false;
       };
     }
-  }, [activeReviewerTab, currentTargetLesson.id]);
+  }, [activeReviewerTab, currentTargetLesson.id, currentTargetLesson.pages, currentTargetLesson.processingStatus]);
 
   // Citation inspection
   const openInspector = (pageNumber: number | string, excerpt?: string) => {
@@ -375,6 +411,24 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
           .flatMap((l) => l.pages);
       }
 
+      // Verify that full document content is loaded and not placeholder
+      if (isPlaceholderContent(targetPages) || currentTargetLesson.processingStatus === 'reprocessing_required') {
+        try {
+          const reconstructed = await loadAndReconstructLesson(currentTargetLesson.id);
+          if (isPlaceholderContent(reconstructed.pages)) {
+            setError('This learning material needs to be processed again to access its complete content.');
+            setStage('setup');
+            return;
+          }
+          targetPages = reconstructed.pages;
+          if (onSelectLesson) onSelectLesson(reconstructed);
+        } catch {
+          setError('This learning material needs to be processed again to access its complete content.');
+          setStage('setup');
+          return;
+        }
+      }
+
       // Filter pages by chapter range if not "all"
       let startPage: number | undefined;
       let endPage: number | undefined;
@@ -401,6 +455,9 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
         questionCount,
         difficulty,
         questionTypes,
+        lessonId: currentTargetLesson.id,
+        documentId: currentTargetLesson.id,
+        filename: currentTargetLesson.fileName,
       });
 
       if (!res.success && res.insufficient) {
@@ -814,6 +871,35 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
         <>
           {stage === 'setup' && (
             <div className="space-y-6">
+              {/* Reprocessing required alert if incomplete */}
+              {(isPlaceholderContent(currentTargetLesson.pages) || currentTargetLesson.processingStatus === 'reprocessing_required') && (
+                <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+                  <div className="flex items-start space-x-3">
+                    <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-xs font-bold text-amber-950">
+                        This learning material needs to be processed again to access its complete content.
+                      </p>
+                      <p className="text-[11px] text-amber-800/80">
+                        Before generating quizzes with page citations, the full document text must be extracted.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const rec = await loadAndReconstructLesson(currentTargetLesson.id, { forceReprocess: true });
+                        if (onSelectLesson) onSelectLesson(rec);
+                      } catch {}
+                    }}
+                    className="px-3.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-xl shadow-xs transition-colors shrink-0 cursor-pointer"
+                  >
+                    Reprocess Learning Material
+                  </button>
+                </div>
+              )}
+
               {/* QUIZ MODE SWITCHER (ABOVE THE CONFIGURATION AS REQUESTED) */}
               <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-sm space-y-3">
                 <div className="flex items-center justify-between">

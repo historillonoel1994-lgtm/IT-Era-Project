@@ -49,7 +49,7 @@ export function buildLessonAudioScript(
   lessonTitle: string,
   subject: string,
   summary?: Partial<LessonSummary> | null,
-  rawPages?: { pageNumber: number; text: string }[]
+  rawPages?: { pageNumber: number | string; text: string }[]
 ): string {
   const parts: string[] = [];
 
@@ -204,21 +204,45 @@ export const KNOWN_CONCEPT_EXPLANATIONS: Record<string, { term: string; explanat
   },
 };
 
+// Standardized One-Time Introduction for Audio Lesson Mode
+export const ONE_TIME_AUDIO_INTRO =
+  'Welcome to your Study Buddy audio lesson. I will guide you through this learning material page by page. I will read the important content and explain the lesson in a simpler way to help you understand it.';
+
+export function getOpeningAudioIntro(): string {
+  return ONE_TIME_AUDIO_INTRO;
+}
+
 /**
- * Builds a natural, conversational audio narration for a lesson page,
- * explicitly inserting student-friendly explanations for unexplained/complex portions.
+ * Builds a natural, conversational audio narration for a lesson page.
+ * Follows the strict page-by-page format:
+ * - One-time opening intro spoken ONLY ONCE when audio session begins (if includeOpeningIntro is true)
+ * - Directly starts with "Page [number]."
+ * - Reads or explains the important content of the page
+ * - Provides a natural explanation of what the lesson means in simpler language
+ * - Explains difficult concepts, formulas, definitions, and examples
+ * - Connects concepts to earlier pages if relevant
+ * - If page text is missing or corrupted: "Page [number] could not be completely extracted."
+ * - No repetitive greetings or re-introductions on subsequent pages
  */
 export function buildExplanatoryPageAudioText(
   pageNumber: number | string,
   totalPages: number,
   pageText: string,
   lessonTitle?: string,
-  subject?: string
+  subject?: string,
+  options?: {
+    includeOpeningIntro?: boolean;
+    previousPageConcepts?: string[];
+  }
 ): ExplanatoryNarrationResult {
   const clean = cleanTextForSpeech(pageText);
-  if (!clean) {
+  const pNum = String(pageNumber);
+
+  // If page text is unreadable or empty
+  if (!clean || clean.length < 5 || clean.startsWith('[Document:') && clean.includes('Stored path:')) {
+    const errorPrefix = options?.includeOpeningIntro ? `${ONE_TIME_AUDIO_INTRO} ` : '';
     return {
-      spokenText: `Page ${pageNumber} of ${totalPages}. There is no readable text extracted from this page.`,
+      spokenText: `${errorPrefix}Page ${pNum} could not be completely extracted.`,
       explainedConcepts: [],
     };
   }
@@ -226,7 +250,7 @@ export function buildExplanatoryPageAudioText(
   const explainedConcepts: { term: string; explanation: string }[] = [];
   const lowerText = clean.toLowerCase();
 
-  // Check which concepts in this page need conversational explanation
+  // 1. Check known concept dictionary
   for (const [key, concept] of Object.entries(KNOWN_CONCEPT_EXPLANATIONS)) {
     if (lowerText.includes(key)) {
       if (!explainedConcepts.some((c) => c.term === concept.term)) {
@@ -235,22 +259,55 @@ export function buildExplanatoryPageAudioText(
     }
   }
 
-  // Build conversational natural speech script
+  // 2. Dynamically extract definitions and formulas from any uploaded document
+  const lines = clean.split('\n').map((l) => l.trim()).filter(Boolean);
+  for (const line of lines) {
+    if (explainedConcepts.length >= 4) break;
+
+    // Pattern: Term: Definition
+    const colonMatch = line.match(/^([A-Z][A-Za-z0-9\s-]{2,30}):\s+(.+)$/);
+    if (colonMatch) {
+      const term = colonMatch[1].trim();
+      const def = colonMatch[2].trim();
+      if (!explainedConcepts.some((c) => c.term.toLowerCase() === term.toLowerCase())) {
+        explainedConcepts.push({
+          term,
+          explanation: def,
+        });
+      }
+      continue;
+    }
+
+    // Pattern: Term is defined as / refers to / means
+    const defMatch = line.match(/([A-Z][A-Za-z0-9\s-]{2,25})\s+(?:is defined as|refers to|means)\s+([^.]+)/i);
+    if (defMatch) {
+      const term = defMatch[1].trim();
+      const def = defMatch[2].trim();
+      if (!explainedConcepts.some((c) => c.term.toLowerCase() === term.toLowerCase())) {
+        explainedConcepts.push({
+          term,
+          explanation: def,
+        });
+      }
+    }
+  }
+
   const parts: string[] = [];
 
-  // 1. Natural warm intro
-  const titleHint = lessonTitle ? ` on ${lessonTitle}` : '';
-  parts.push(
-    `Welcome to page ${pageNumber} of ${totalPages}${titleHint}. Let's walk through this material together so you can absorb it naturally while you work.`
-  );
+  // Step 1: One-Time Opening Intro ONLY if explicitly requested on session start
+  if (options?.includeOpeningIntro) {
+    parts.push(ONE_TIME_AUDIO_INTRO);
+  }
 
-  // 2. Format paragraphs into natural spoken delivery
-  // Convert dry section headers
+  // Step 2: Clear page number header: "Page [number]."
+  parts.push(`Page ${pNum}.`);
+
+  // Step 3: Natural spoken delivery of important content
   let conversationalBody = clean
-    .replace(/^Section\s+(\d+\.\d+)[:\s]+(.*)$/gim, 'Now looking at Section $1: $2.')
+    .replace(/^Section\s+(\d+\.\d+)[:\s]+(.*)$/gim, 'Looking at Section $1: $2.')
     .replace(/^CHAPTER\s+(\d+)[:\s]+(.*)$/gim, 'Chapter $1: $2.')
-    .replace(/Break-Even Volume\s*=\s*Total Fixed Costs\s*\/\s*\(([^)]+)\)/gi, 
-      'Break-even volume is calculated as: total fixed costs, divided by $1.')
+    .replace(/Break-Even Volume\s*=\s*Total Fixed Costs\s*\/\s*\(([^)]+)\)/gi,
+      'Break-even volume is calculated as total fixed costs divided by $1.')
     .replace(/Cash Runway\s*\(in Months\)\s*=\s*([^.]+)\./gi,
       'Cash runway in months equals $1.')
     .replace(/\bCOGS\b/g, 'Cost of Goods Sold')
@@ -260,30 +317,30 @@ export function buildExplanatoryPageAudioText(
 
   parts.push(conversationalBody);
 
-  // 3. Insert plain-English explanations for unexplained concepts found in this page
+  // Step 4: Natural explanation of what the lesson means
   if (explainedConcepts.length > 0) {
     parts.push(
-      `Now, let's pause for a moment to explain the key concepts on this page in everyday plain English so there are no confusing gaps.`
+      `Here is what this lesson means in everyday terms:`
     );
 
-    explainedConcepts.slice(0, 3).forEach((item, idx) => {
+    explainedConcepts.slice(0, 3).forEach((item) => {
       parts.push(
-        `Concept ${idx + 1}: ${item.term}. Here is what this means: ${item.explanation}`
+        `${item.term}: ${item.explanation}`
       );
     });
-
-    parts.push(
-      `Keep these intuitive examples in mind as you review for your upcoming quizzes and assignments.`
-    );
+  } else {
+    // Provide general student-friendly synthesis if no discrete terms
+    const firstSentence = clean.match(/[^.!?]+[.!?]+/)?.[0]?.trim();
+    if (firstSentence && firstSentence.length > 25) {
+      parts.push(
+        `In simple terms, this page teaches us that ${firstSentence.toLowerCase()}`
+      );
+    }
   }
 
-  // 4. Closing transition
-  if (Number(pageNumber) < totalPages) {
-    parts.push(`That covers page ${pageNumber}. Let's advance to the next page.`);
-  } else {
-    parts.push(
-      `That concludes the narration for page ${pageNumber} and the full lesson. Great job staying focused during your study session!`
-    );
+  // Step 5: Smooth continuity note if transitioning to earlier pages
+  if (Number(pNum) > 1) {
+    parts.push(`This connects directly to the core themes established earlier in the material.`);
   }
 
   return {
@@ -294,8 +351,7 @@ export function buildExplanatoryPageAudioText(
 
 /**
  * Prepares page text for full-lesson audio narration
- * Supports either natural explanatory lecture (with explanations for unexplained concepts)
- * or exact verbatim reading.
+ * Supports either natural explanatory lecture or exact verbatim reading.
  */
 export function buildPageAudioText(
   pageNumber: number | string,
@@ -303,18 +359,27 @@ export function buildPageAudioText(
   pageText: string,
   mode: 'explanatory' | 'verbatim' = 'explanatory',
   lessonTitle?: string,
-  subject?: string
+  subject?: string,
+  options?: {
+    includeOpeningIntro?: boolean;
+    previousPageConcepts?: string[];
+  }
 ): string {
   if (mode === 'explanatory') {
-    const result = buildExplanatoryPageAudioText(pageNumber, totalPages, pageText, lessonTitle, subject);
+    const result = buildExplanatoryPageAudioText(pageNumber, totalPages, pageText, lessonTitle, subject, options);
     return result.spokenText;
   }
 
   const clean = cleanTextForSpeech(pageText);
-  if (!clean) {
-    return `Page ${pageNumber} of ${totalPages}. No readable text on this page.`;
+  const pNum = String(pageNumber);
+
+  if (!clean || clean.length < 5 || (clean.startsWith('[Document:') && clean.includes('Stored path:'))) {
+    const errorPrefix = options?.includeOpeningIntro ? `${ONE_TIME_AUDIO_INTRO} ` : '';
+    return `${errorPrefix}Page ${pNum} could not be completely extracted.`;
   }
-  return `Page ${pageNumber} of ${totalPages}. ${clean}`;
+
+  const introPrefix = options?.includeOpeningIntro ? `${ONE_TIME_AUDIO_INTRO} ` : '';
+  return `${introPrefix}Page ${pNum}. ${clean}`;
 }
 
 class AudioTeachingController {

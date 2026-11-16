@@ -9,26 +9,29 @@ import {
   Check,
   Loader2,
   AlertCircle,
-  LogOut,
-  Database,
-  ExternalLink,
-  ChevronDown,
-  ChevronUp,
+  Shield,
+  ShieldCheck,
   KeyRound,
-  Globe,
-  CheckCircle2,
+  Sparkles,
+  ArrowRight,
+  RotateCcw,
 } from 'lucide-react';
-import { UserProfile } from '../types';
+import { UserProfile, UserRole } from '../types';
 import { DEFAULT_USER } from '../data/mockUserData';
-import { saveUserProfile, setLoggedIn, syncUserDataFromSupabase } from '../services/storage';
+import {
+  saveUserProfile,
+  setLoggedIn,
+  syncUserDataFromSupabase,
+  resetUserScopedLocalData,
+} from '../services/storage';
 import {
   signUpStudent,
   signInStudent,
   signOutStudent,
   getActiveSupabaseConfig,
-  saveSupabaseCredentials,
-  clearSupabaseCredentials,
-  testSupabaseConnection,
+  verifyUserRoleWithServer,
+  triggerInitialSuperAdminBootstrap,
+  sendPasswordResetEmail,
 } from '../lib/supabase';
 
 interface AuthModalProps {
@@ -36,7 +39,8 @@ interface AuthModalProps {
   onClose: () => void;
   currentUser: UserProfile;
   onUserChange: (user: UserProfile) => void;
-  initialMode?: 'login' | 'signup';
+  initialMode?: 'login' | 'signup' | 'admin_login';
+  onOpenAdminDashboard?: () => void;
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({
@@ -45,582 +49,803 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   currentUser,
   onUserChange,
   initialMode = 'login',
+  onOpenAdminDashboard,
 }) => {
-  const [mode, setMode] = useState<'login' | 'signup'>(initialMode);
+  // Login Type: 'student' or 'admin'
+  const [loginType, setLoginType] = useState<'student' | 'admin'>(
+    initialMode === 'admin_login' ? 'admin' : 'student'
+  );
+
+  // Student Submode: 'login' | 'signup' | 'forgot_password'
+  const [studentMode, setStudentMode] = useState<'login' | 'signup' | 'forgot_password'>('login');
+
+  // Form Fields
   const [fullName, setFullName] = useState(currentUser.fullName);
   const [email, setEmail] = useState(currentUser.email);
   const [password, setPassword] = useState('');
   const [degree, setDegree] = useState(currentUser.degree);
   const [jobTitle, setJobTitle] = useState(currentUser.jobTitle);
 
-  // Supabase Configuration State
-  const [supabaseConfig, setSupabaseConfig] = useState(getActiveSupabaseConfig());
-  const [inputUrl, setInputUrl] = useState(supabaseConfig.url || '');
-  const [inputKey, setInputKey] = useState(supabaseConfig.key || '');
-  const [isConfigDrawerOpen, setIsConfigDrawerOpen] = useState(!supabaseConfig.isConfigured);
-  const [testingConnection, setTestingConnection] = useState(false);
-  const [connectionTestFeedback, setConnectionTestFeedback] = useState<{
-    type: 'success' | 'error' | null;
-    message: string;
-  }>({ type: null, message: '' });
-
-  // Status & Feedback states
+  // Feedback states
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
+  // Initial Super Admin Quick Activation status
+  const [isBootstrappingInitial, setIsBootstrappingInitial] = useState(false);
+
+  const switchStudentMode = (nextMode: 'login' | 'signup' | 'forgot_password') => {
+    setStudentMode(nextMode);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    if (nextMode === 'signup') {
+      setFullName('');
+      setEmail('');
+      setPassword('');
+      setDegree('');
+      setJobTitle('');
+    }
+  };
+
   useEffect(() => {
     if (isOpen) {
-      setMode(initialMode);
       setErrorMessage(null);
       setSuccessMessage(null);
-      const current = getActiveSupabaseConfig();
-      setSupabaseConfig(current);
-      setInputUrl(current.url || '');
-      setInputKey(current.key || '');
-      if (!current.isConfigured) {
-        setIsConfigDrawerOpen(true);
+      setPassword('');
+      if (initialMode === 'admin_login') {
+        setLoginType('admin');
+        setStudentMode('login');
+      } else if (initialMode === 'signup') {
+        setLoginType('student');
+        setStudentMode('signup');
+        setFullName('');
+        setEmail('');
+        setDegree('');
+        setJobTitle('');
+      } else {
+        setLoginType('student');
+        setStudentMode('login');
+        setFullName(currentUser.fullName);
+        setEmail(currentUser.email);
+        setDegree(currentUser.degree);
+        setJobTitle(currentUser.jobTitle);
       }
     }
   }, [isOpen, initialMode]);
 
   if (!isOpen) return null;
 
-  // Handle Testing & Connecting Supabase directly from UI
-  const handleConnectSupabase = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setConnectionTestFeedback({ type: null, message: '' });
-    setTestingConnection(true);
-
-    const testRes = await testSupabaseConnection(inputUrl, inputKey);
-    setTestingConnection(false);
-
-    if (testRes.success) {
-      saveSupabaseCredentials(inputUrl, inputKey);
-      const updated = getActiveSupabaseConfig();
-      setSupabaseConfig(updated);
-      setConnectionTestFeedback({
-        type: 'success',
-        message: 'Successfully connected to Supabase! You can now Sign Up or Log In.',
-      });
-      setTimeout(() => {
-        setIsConfigDrawerOpen(false);
-      }, 1500);
-    } else {
-      setConnectionTestFeedback({
-        type: 'error',
-        message: testRes.message,
-      });
-    }
-  };
-
-  const handleDisconnect = () => {
-    clearSupabaseCredentials();
-    const updated = getActiveSupabaseConfig();
-    setSupabaseConfig(updated);
-    setInputUrl('');
-    setInputKey('');
-    setConnectionTestFeedback({ type: null, message: '' });
-    setIsConfigDrawerOpen(true);
-  };
-
+  // Handle Student Login & Sign Up
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
     setSuccessMessage(null);
 
     if (!email.trim()) {
-      setErrorMessage('Please enter your student email address.');
+      setErrorMessage('Please enter a valid email address.');
+      return;
+    }
+
+    if (studentMode === 'forgot_password') {
+      setLoading(true);
+      setLoadingMessage('Sending password recovery instructions...');
+      const res = await sendPasswordResetEmail(email.trim());
+      setLoading(false);
+      if (res.success) {
+        setSuccessMessage('Password recovery link sent! Please check your email inbox.');
+      } else {
+        setErrorMessage(res.error || 'Failed to send recovery email. Please try again.');
+      }
       return;
     }
 
     if (!password) {
-      setErrorMessage('Please enter a password.');
+      setErrorMessage('Please enter your password.');
       return;
     }
 
-    if (password.length < 6) {
-      setErrorMessage('Password must be at least 6 characters.');
-      return;
-    }
+    const supabaseConfig = getActiveSupabaseConfig();
+    const cleanEmail = email.trim();
 
-    // 1. SUPABASE AUTHENTICATION FLOW
-    if (supabaseConfig.isConfigured) {
+    // -------------------------------------------------------------
+    // ADMINISTRATOR LOGIN FLOW
+    // -------------------------------------------------------------
+    if (loginType === 'admin') {
       setLoading(true);
+      setLoadingMessage('Authenticating administrator credentials with Supabase...');
 
-      if (mode === 'signup') {
+      if (supabaseConfig.isConfigured) {
+        const authRes = await signInStudent({
+          email: cleanEmail,
+          password,
+        });
+
+        if (authRes.error) {
+          setLoading(false);
+          setErrorMessage(authRes.error);
+          return;
+        }
+
+        // Server-Side Role Verification (CRITICAL SECURITY REQUIREMENT)
+        setLoadingMessage('Verifying administrative access permissions...');
+        const roleRes = await verifyUserRoleWithServer({
+          email: cleanEmail,
+          userId: authRes.user?.id,
+          fullName: authRes.profile?.fullName,
+        });
+
+        if (!roleRes.isAdmin) {
+          // Immediately sign out from Supabase to prevent unauthorized session
+          await signOutStudent();
+          setLoading(false);
+          setErrorMessage(
+            `Access Denied: The account "${cleanEmail}" does not possess Administrator or Super Administrator privileges. Please use Student Login.`
+          );
+          return;
+        }
+
+        setLoading(false);
+        const adminProfile: UserProfile = {
+          id: authRes.user?.id || 'admin-user',
+          fullName: authRes.profile?.fullName || 'Administrator',
+          email: cleanEmail,
+          role: roleRes.role,
+          degree: authRes.profile?.degree || 'Master of Science',
+          jobTitle: authRes.profile?.jobTitle || 'System Administrator',
+          avatarSeed: cleanEmail.toLowerCase().replace(/\s+/g, '-'),
+          accountStatus: roleRes.accountStatus,
+        };
+
+        if (adminProfile.id !== currentUser.id) {
+          resetUserScopedLocalData(adminProfile.id);
+        }
+        saveUserProfile(adminProfile);
+        setLoggedIn(true);
+        onUserChange(adminProfile);
+        syncUserDataFromSupabase(adminProfile.id);
+        setSuccessMessage(`Welcome, Administrator ${adminProfile.fullName}!`);
+
+        setTimeout(() => {
+          onClose();
+          if (onOpenAdminDashboard) {
+            onOpenAdminDashboard();
+          }
+        }, 800);
+        return;
+      } else {
+        // Local offline check if Supabase is unconfigured
+        const roleRes = await verifyUserRoleWithServer({ email: cleanEmail });
+        setLoading(false);
+        if (!roleRes.isAdmin) {
+          setErrorMessage(
+            `Access Denied: The account "${cleanEmail}" does not possess administrative privileges.`
+          );
+          return;
+        }
+
+        const adminProfile: UserProfile = {
+          id: 'admin-super-noel-01',
+          fullName: 'Noel Historillo',
+          email: cleanEmail,
+          role: 'super_admin',
+          degree: 'Master of Science in Information Technology',
+          jobTitle: 'Super Administrator',
+          avatarSeed: 'noel-historillo',
+          accountStatus: 'active',
+        };
+        if (adminProfile.id !== currentUser.id) {
+          resetUserScopedLocalData(adminProfile.id);
+        }
+        saveUserProfile(adminProfile);
+        setLoggedIn(true);
+        onUserChange(adminProfile);
+        setSuccessMessage(`Welcome, Super Administrator Noel Historillo!`);
+        setTimeout(() => {
+          onClose();
+          if (onOpenAdminDashboard) {
+            onOpenAdminDashboard();
+          }
+        }, 800);
+        return;
+      }
+    }
+
+    // -------------------------------------------------------------
+    // STUDENT LOGIN & SIGNUP FLOW
+    // -------------------------------------------------------------
+    if (loginType === 'student') {
+      if (studentMode === 'signup') {
         if (!fullName.trim()) {
           setErrorMessage('Please enter your full name for your student profile.');
-          setLoading(false);
           return;
         }
-
-        setLoadingMessage('Creating student account on Supabase Auth & saving profile...');
-        const res = await signUpStudent({
-          email: email.trim(),
-          password,
-          fullName: fullName.trim(),
-          degree: degree.trim(),
-          jobTitle: jobTitle.trim(),
-        });
-
-        setLoading(false);
-
-        if (res.error) {
-          setErrorMessage(res.error);
-          return;
-        }
-
-        if (res.needsEmailConfirmation) {
-          setSuccessMessage(
-            'Account created! A confirmation email has been sent by Supabase. If email confirmation is disabled in your Supabase project, you can now switch to Login.'
-          );
-          setMode('login');
-          return;
-        }
-
-        if (res.user) {
-          const newProfile: UserProfile = {
-            id: res.user.id,
-            fullName: fullName.trim(),
-            email: email.trim(),
-            degree: degree.trim() || 'College Degree',
-            jobTitle: jobTitle.trim() || 'Working Student',
-            avatarSeed: fullName.trim().toLowerCase().replace(/\s+/g, '-'),
-          };
-          saveUserProfile(newProfile);
-          setLoggedIn(true);
-          onUserChange(newProfile);
-          setSuccessMessage('Student account registered and authenticated via Supabase!');
-          setTimeout(() => {
-            onClose();
-          }, 900);
-          return;
-        }
-      } else {
-        // LOGIN MODE
-        setLoadingMessage('Authenticating with Supabase...');
-        const res = await signInStudent({
-          email: email.trim(),
-          password,
-        });
-
-        setLoading(false);
-
-        if (res.error) {
-          setErrorMessage(res.error);
-          return;
-        }
-
-        if (res.profile) {
-          saveUserProfile(res.profile);
-          setLoggedIn(true);
-          onUserChange(res.profile);
-          // Sync student's materials, quizzes, and progress
-          syncUserDataFromSupabase(res.profile.id);
-          setSuccessMessage(`Welcome back, ${res.profile.fullName}!`);
-          setTimeout(() => {
-            onClose();
-          }, 800);
+        if (password.length < 6) {
+          setErrorMessage('Password must be at least 6 characters long.');
           return;
         }
       }
+
+      if (supabaseConfig.isConfigured) {
+        setLoading(true);
+
+        if (studentMode === 'signup') {
+          setLoadingMessage('Creating student account on Supabase Auth...');
+          const res = await signUpStudent({
+            email: cleanEmail,
+            password,
+            fullName: fullName.trim(),
+            degree: degree.trim(),
+            jobTitle: jobTitle.trim(),
+          });
+
+          if (res.error) {
+            setLoading(false);
+            setErrorMessage(res.error);
+            return;
+          }
+
+          if (res.needsEmailConfirmation) {
+            setLoading(false);
+            setSuccessMessage(
+              'Student account registered! A confirmation email has been sent by Supabase. Please verify your email, then log in.'
+            );
+            setStudentMode('login');
+            setPassword('');
+            return;
+          }
+
+          if (res.user) {
+            const roleCheck = await verifyUserRoleWithServer({
+              email: cleanEmail,
+              userId: res.user.id,
+              fullName: fullName.trim(),
+              degree: degree.trim(),
+              jobTitle: jobTitle.trim(),
+            });
+
+            const newProfile: UserProfile = {
+              id: res.user.id,
+              fullName: fullName.trim(),
+              email: cleanEmail,
+              role: roleCheck.role,
+              degree: degree.trim() || 'College Student',
+              jobTitle: jobTitle.trim() || 'Working Student',
+              avatarSeed: fullName.trim().toLowerCase().replace(/\s+/g, '-'),
+              accountStatus: 'active',
+            };
+
+            resetUserScopedLocalData(newProfile.id);
+            saveUserProfile(newProfile);
+            setLoggedIn(true);
+            onUserChange(newProfile);
+            await syncUserDataFromSupabase(newProfile.id);
+            setLoading(false);
+            setSuccessMessage('Student account registered and authenticated via Supabase!');
+            setTimeout(() => {
+              onClose();
+            }, 800);
+            return;
+          }
+          setLoading(false);
+        } else {
+          // STUDENT LOGIN
+          setLoadingMessage('Authenticating with Supabase...');
+          const res = await signInStudent({
+            email: cleanEmail,
+            password,
+          });
+
+          setLoading(false);
+
+          if (res.error) {
+            setErrorMessage(res.error);
+            return;
+          }
+
+          if (res.profile) {
+            const roleCheck = await verifyUserRoleWithServer({
+              email: cleanEmail,
+              userId: res.profile.id,
+              fullName: res.profile.fullName,
+            });
+
+            if (roleCheck.error) {
+              setErrorMessage(roleCheck.error);
+              return;
+            }
+
+            const updatedProfile: UserProfile = {
+              ...res.profile,
+              role: roleCheck.role,
+              accountStatus: roleCheck.accountStatus,
+            };
+
+            if (updatedProfile.id !== currentUser.id) {
+              resetUserScopedLocalData(updatedProfile.id);
+            }
+            saveUserProfile(updatedProfile);
+            setLoggedIn(true);
+            onUserChange(updatedProfile);
+            await syncUserDataFromSupabase(updatedProfile.id);
+            setSuccessMessage(`Welcome back, ${updatedProfile.fullName}!`);
+            setTimeout(() => {
+              onClose();
+            }, 800);
+            return;
+          }
+        }
+      } else {
+        // Local session fallback when Supabase credentials are not configured
+        setLoading(true);
+        const cleanName = fullName.trim() || cleanEmail.split('@')[0];
+        const deterministicId = `local-${cleanEmail.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
+        const roleCheck = await verifyUserRoleWithServer({
+          email: cleanEmail,
+          userId: deterministicId,
+          fullName: cleanName,
+          degree: degree.trim(),
+          jobTitle: jobTitle.trim(),
+        });
+        setLoading(false);
+        if (roleCheck.error) {
+          setErrorMessage(roleCheck.error);
+          return;
+        }
+        const localUser: UserProfile = {
+          id: deterministicId,
+          fullName: cleanName,
+          email: cleanEmail,
+          role: roleCheck.role,
+          degree: degree.trim() || 'College Student',
+          jobTitle: jobTitle.trim() || 'Working Student',
+          avatarSeed: cleanName.toLowerCase().replace(/\s+/g, '-'),
+          accountStatus: roleCheck.accountStatus || 'active',
+        };
+        if (localUser.id !== currentUser.id) {
+          resetUserScopedLocalData(localUser.id);
+        }
+        saveUserProfile(localUser);
+        setLoggedIn(true);
+        onUserChange(localUser);
+        setSuccessMessage(
+          studentMode === 'signup'
+            ? `Student account created for ${cleanName}!`
+            : `Welcome back, ${cleanName}!`
+        );
+        setTimeout(() => {
+          onClose();
+        }, 800);
+      }
+    }
+  };
+
+  // Quick initial Super Administrator setup trigger (for Noel Historillo)
+  const handleBootstrapInitialAdmin = async () => {
+    setIsBootstrappingInitial(true);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    const res = await triggerInitialSuperAdminBootstrap({
+      email: 'historillo.noel1994@gmail.com',
+      fullName: 'Noel Historillo',
+    });
+    setIsBootstrappingInitial(false);
+
+    if (res.success) {
+      setSuccessMessage(res.message);
+      setEmail('historillo.noel1994@gmail.com');
+      setLoginType('admin');
     } else {
-      // 2. FALLBACK LOCAL MODE (If Supabase keys are not set yet)
-      const updated: UserProfile = {
-        id: `usr-${Date.now()}`,
-        fullName: fullName.trim() || 'Working Student',
-        email: email.trim() || 'student@university.edu',
-        degree: degree.trim() || 'College Degree',
-        jobTitle: jobTitle.trim() || 'Working Student',
-        avatarSeed: (fullName || 'student').toLowerCase().replace(/\s+/g, '-'),
-      };
-      saveUserProfile(updated);
-      setLoggedIn(true);
-      onUserChange(updated);
-      setSuccessMessage('Profile active locally. Connect Supabase above to sync to cloud database.');
-      setTimeout(() => {
-        onClose();
-      }, 900);
+      setErrorMessage(res.message);
     }
-  };
-
-  const handleLogout = async () => {
-    setLoading(true);
-    setLoadingMessage('Signing out from Supabase...');
-    if (supabaseConfig.isConfigured) {
-      await signOutStudent();
-    }
-    setLoggedIn(false);
-    saveUserProfile(DEFAULT_USER);
-    onUserChange(DEFAULT_USER);
-    setLoading(false);
-    onClose();
-  };
-
-  const handleQuickDemoJuan = () => {
-    saveUserProfile(DEFAULT_USER);
-    setLoggedIn(true);
-    onUserChange(DEFAULT_USER);
-    onClose();
-  };
-
-  const handleQuickDemoMaria = () => {
-    const maria: UserProfile = {
-      id: 'usr-working-maria',
-      fullName: 'Maria Santos',
-      email: 'maria.santos@univ.edu',
-      degree: 'BS Information Technology (3rd Year)',
-      jobTitle: 'BPO Customer Support (Night Shift, 30 hrs/wk)',
-      institution: 'City State College',
-      avatarSeed: 'maria-studybuddy',
-    };
-    saveUserProfile(maria);
-    setLoggedIn(true);
-    onUserChange(maria);
-    onClose();
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn">
-      <div className="bg-white rounded-2xl shadow-2xl border border-sky-100 max-w-lg w-full overflow-hidden flex flex-col max-h-[92vh]">
+      <div className="bg-white rounded-3xl shadow-2xl border border-slate-200/90 max-w-lg w-full overflow-hidden flex flex-col max-h-[92vh]">
         {/* Header */}
-        <div className="px-6 py-4 bg-gradient-to-r from-sky-800 to-slate-900 text-white flex items-center justify-between">
+        <div className="px-6 py-4 bg-gradient-to-r from-slate-900 via-sky-950 to-indigo-950 text-white flex items-center justify-between">
           <div className="space-y-0.5">
             <div className="flex items-center space-x-2">
-              <h3 className="font-bold text-base text-white">Student Account & Profile</h3>
+              <h3 className="font-extrabold text-base text-white tracking-tight">
+                Study Buddy AI Authentication
+              </h3>
               <span className="px-2 py-0.5 bg-sky-500/20 text-sky-200 border border-sky-400/30 text-[10px] rounded-full font-semibold flex items-center space-x-1">
-                <CheckCircle2 className="w-3 h-3 text-sky-300" />
-                <span>Account Access</span>
+                <ShieldCheck className="w-3 h-3 text-sky-300" />
+                <span>Supabase RBAC</span>
               </span>
             </div>
             <p className="text-xs text-sky-200/90">
-              Manage your student profile & study records
+              {loginType === 'student'
+                ? 'Sign in to access your learning materials, quizzes & study plans'
+                : 'Restricted administrative authorization portal'}
             </p>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+            className="p-1.5 rounded-xl text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Connection Header Bar */}
-        <div className="px-6 py-2 bg-slate-100 border-b border-slate-200 flex items-center justify-between text-xs">
-          <div className="flex items-center space-x-2">
-            <span
-              className={`w-2 h-2 rounded-full ${
-                supabaseConfig.isConfigured ? 'bg-emerald-500' : 'bg-slate-400'
-              }`}
-            />
-            <span className="font-medium text-slate-700 text-[11px]">
-              {supabaseConfig.isConfigured
-                ? 'Account Cloud Sync Active'
-                : 'Offline Mode (Local Storage)'}
-            </span>
-          </div>
+        {/* TWO PRIMARY LOGIN OPTIONS (PART 2) */}
+        <div className="grid grid-cols-2 p-1.5 bg-slate-100 border-b border-slate-200 text-xs font-bold">
+          <button
+            type="button"
+            onClick={() => {
+              setLoginType('student');
+              setStudentMode('login');
+              setErrorMessage(null);
+              setSuccessMessage(null);
+            }}
+            className={`py-2.5 px-3 rounded-2xl flex items-center justify-center space-x-2 transition-all cursor-pointer ${
+              loginType === 'student'
+                ? 'bg-white text-sky-800 shadow-sm border border-slate-200/80 font-black'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <GraduationCap className="w-4 h-4 text-sky-600" />
+            <span>STUDENT LOGIN</span>
+          </button>
 
           <button
             type="button"
-            onClick={() => setIsConfigDrawerOpen(!isConfigDrawerOpen)}
-            className="inline-flex items-center space-x-1 text-slate-600 hover:text-slate-900 text-[11px] font-semibold cursor-pointer"
-          >
-            <span>{isConfigDrawerOpen ? 'Hide Developer Settings' : 'Developer & Cloud Settings'}</span>
-            {isConfigDrawerOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-          </button>
-        </div>
-
-        {/* Developer Connection Setup Box */}
-        {isConfigDrawerOpen && (
-          <div className="px-6 py-4 bg-amber-50/70 border-b border-amber-200 text-xs space-y-3">
-            <div className="flex items-start justify-between">
-              <div>
-                <h4 className="font-bold text-amber-950 flex items-center space-x-1.5 text-xs">
-                  <Database className="w-4 h-4 text-amber-700" />
-                  <span>Developer & Cloud Connection</span>
-                </h4>
-                <p className="text-[11px] text-amber-800 mt-0.5">
-                  Configure backend Supabase project credentials (URL & public API key).
-                </p>
-              </div>
-
-              {supabaseConfig.isConfigured && (
-                <button
-                  type="button"
-                  onClick={handleDisconnect}
-                  className="text-[10px] text-red-600 hover:text-red-800 underline font-medium cursor-pointer"
-                >
-                  Clear credentials
-                </button>
-              )}
-            </div>
-
-            <form onSubmit={handleConnectSupabase} className="space-y-2">
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-700 mb-0.5">
-                  Project URL
-                </label>
-                <div className="relative">
-                  <Globe className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
-                  <input
-                    type="url"
-                    required
-                    value={inputUrl}
-                    onChange={(e) => setInputUrl(e.target.value)}
-                    placeholder="https://your-project-id.supabase.co"
-                    className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-sky-500 font-mono"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-700 mb-0.5">
-                  Publishable / Anon API Key
-                </label>
-                <div className="relative">
-                  <KeyRound className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
-                  <input
-                    type="password"
-                    required
-                    value={inputKey}
-                    onChange={(e) => setInputKey(e.target.value)}
-                    placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                    className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-sky-500 font-mono"
-                  />
-                </div>
-              </div>
-
-              {connectionTestFeedback.message && (
-                <div
-                  className={`p-2 rounded-lg text-[11px] flex items-start space-x-1.5 ${
-                    connectionTestFeedback.type === 'success'
-                      ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
-                      : 'bg-red-100 text-red-900 border border-red-300'
-                  }`}
-                >
-                  {connectionTestFeedback.type === 'success' ? (
-                    <Check className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
-                  ) : (
-                    <AlertCircle className="w-4 h-4 text-red-700 shrink-0 mt-0.5" />
-                  )}
-                  <span>{connectionTestFeedback.message}</span>
-                </div>
-              )}
-
-              <div className="pt-1 flex items-center justify-between">
-                <span className="text-[10px] text-amber-800">
-                  Credentials are saved securely in your browser session.
-                </span>
-                <button
-                  type="submit"
-                  disabled={testingConnection}
-                  className="px-3 py-1.5 bg-sky-700 hover:bg-sky-800 disabled:opacity-50 text-white rounded-lg font-bold text-xs shadow-xs transition-colors flex items-center space-x-1.5 cursor-pointer"
-                >
-                  {testingConnection && <Loader2 className="w-3 h-3 animate-spin" />}
-                  <span>{testingConnection ? 'Testing...' : 'Save & Connect'}</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
-
-        {/* Tab switch */}
-        <div className="px-6 pt-3 border-b border-slate-100 flex space-x-6 text-xs font-semibold bg-slate-50/50">
-          <button
             onClick={() => {
-              setMode('login');
+              setLoginType('admin');
               setErrorMessage(null);
               setSuccessMessage(null);
             }}
-            className={`pb-3 border-b-2 transition-colors cursor-pointer ${
-              mode === 'login'
-                ? 'border-sky-600 text-sky-700'
-                : 'border-transparent text-slate-500 hover:text-slate-800'
+            className={`py-2.5 px-3 rounded-2xl flex items-center justify-center space-x-2 transition-all cursor-pointer ${
+              loginType === 'admin'
+                ? 'bg-slate-900 text-white shadow-sm font-black'
+                : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            Login to Account
-          </button>
-          <button
-            onClick={() => {
-              setMode('signup');
-              setErrorMessage(null);
-              setSuccessMessage(null);
-            }}
-            className={`pb-3 border-b-2 transition-colors cursor-pointer ${
-              mode === 'signup'
-                ? 'border-sky-600 text-sky-700'
-                : 'border-transparent text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            Sign Up New Student
+            <Shield className="w-4 h-4 text-amber-400" />
+            <span>ADMINISTRATOR LOGIN</span>
           </button>
         </div>
 
-        {/* Modal Scrollable Body */}
+        {/* Scrollable Body */}
         <div className="p-6 space-y-4 overflow-y-auto">
-          {/* Feedback banners */}
+          {/* Feedback messages */}
           {errorMessage && (
-            <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800 flex items-start space-x-2">
+            <div className="p-3.5 bg-red-50 border border-red-200 rounded-2xl text-xs text-red-900 flex items-start space-x-2.5 animate-fadeIn">
               <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-              <span>{errorMessage}</span>
+              <div className="space-y-0.5">
+                <span className="font-bold block">Authentication Notice</span>
+                <p className="leading-relaxed">{errorMessage}</p>
+              </div>
             </div>
           )}
 
           {successMessage && (
-            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-start space-x-2">
+            <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl text-xs text-emerald-900 flex items-start space-x-2.5 animate-fadeIn">
               <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-              <span>{successMessage}</span>
+              <div className="space-y-0.5">
+                <span className="font-bold block">Success</span>
+                <p className="leading-relaxed">{successMessage}</p>
+              </div>
             </div>
           )}
 
-          {/* Quick Demo Profiles (Kept for Presentations) */}
-          <div className="p-3 bg-sky-50/70 border border-sky-200/70 rounded-xl space-y-2">
-            <span className="text-[11px] font-bold text-sky-900 uppercase tracking-wider block">
-              Quick 1-Click Demo Profiles (For Class Presentation)
-            </span>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={handleQuickDemoJuan}
-                className="p-2 bg-white hover:bg-sky-100/70 border border-sky-200 rounded-lg text-left text-xs transition-colors cursor-pointer"
-              >
-                <span className="font-bold text-slate-800 block">Juan Dela Cruz</span>
-                <span className="text-[10px] text-slate-500 block truncate">Retail Associate (24h/wk)</span>
-              </button>
-              <button
-                type="button"
-                onClick={handleQuickDemoMaria}
-                className="p-2 bg-white hover:bg-sky-100/70 border border-sky-200 rounded-lg text-left text-xs transition-colors cursor-pointer"
-              >
-                <span className="font-bold text-slate-800 block">Maria Santos</span>
-                <span className="text-[10px] text-slate-500 block truncate">BPO Support (30h/wk)</span>
-              </button>
-            </div>
-          </div>
-
-          <form onSubmit={handleSubmit} className="space-y-3 text-xs">
-            {mode === 'signup' && (
-              <div>
-                <label className="block text-slate-700 font-semibold mb-1">Full Name</label>
-                <div className="relative">
-                  <User className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
-                  <input
-                    type="text"
-                    required
-                    value={fullName}
-                    onChange={(e) => setFullName(e.target.value)}
-                    placeholder="e.g. Juan Dela Cruz"
-                    className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500"
-                  />
-                </div>
-              </div>
-            )}
-
-            <div>
-              <label className="block text-slate-700 font-semibold mb-1">Student Email</label>
-              <div className="relative">
-                <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
-                <input
-                  type="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="student@university.edu"
-                  className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-slate-700 font-semibold mb-1">Password</label>
-              <div className="relative">
-                <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
-                <input
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Enter your password (min 6 chars)"
-                  className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500"
-                />
-              </div>
-              {mode === 'login' && !supabaseConfig.isConfigured && (
-                <p className="text-[10px] text-amber-700 mt-1">
-                  💡 Note: To log into a real Supabase account, click <strong>"Configure Connection"</strong> above and provide your Supabase URL & Key.
-                </p>
-              )}
-            </div>
-
-            {mode === 'signup' && (
-              <>
-                <div>
-                  <label className="block text-slate-700 font-semibold mb-1">Degree / Major</label>
-                  <div className="relative">
-                    <GraduationCap className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
-                    <input
-                      type="text"
-                      value={degree}
-                      onChange={(e) => setDegree(e.target.value)}
-                      placeholder="e.g. BS Business Administration"
-                      className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500"
-                    />
-                  </div>
+          {/* ========================================================= */}
+          {/* 1. STUDENT LOGIN INTERFACE */}
+          {/* ========================================================= */}
+          {loginType === 'student' && (
+            <div className="space-y-4">
+              {/* Sub-mode navigation for Student */}
+              <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                <div className="space-x-3 text-xs font-bold">
+                  <button
+                    type="button"
+                    onClick={() => switchStudentMode('login')}
+                    className={`pb-1 cursor-pointer transition-colors ${
+                      studentMode === 'login'
+                        ? 'text-sky-700 border-b-2 border-sky-600'
+                        : 'text-slate-400 hover:text-slate-700'
+                    }`}
+                  >
+                    Student Log In
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => switchStudentMode('signup')}
+                    className={`pb-1 cursor-pointer transition-colors ${
+                      studentMode === 'signup'
+                        ? 'text-sky-700 border-b-2 border-sky-600'
+                        : 'text-slate-400 hover:text-slate-700'
+                    }`}
+                  >
+                    Register New Student
+                  </button>
                 </div>
 
-                <div>
-                  <label className="block text-slate-700 font-semibold mb-1">Job / Employment Role</label>
-                  <div className="relative">
-                    <Briefcase className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
-                    <input
-                      type="text"
-                      value={jobTitle}
-                      onChange={(e) => setJobTitle(e.target.value)}
-                      placeholder="e.g. Retail Sales Associate (24 hrs/wk)"
-                      className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500"
-                    />
-                  </div>
-                </div>
-              </>
-            )}
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-2.5 bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white font-bold rounded-xl shadow transition-colors mt-2 cursor-pointer flex items-center justify-center space-x-2"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>{loadingMessage || 'Processing...'}</span>
-                </>
-              ) : (
-                <span>
-                  {mode === 'login' ? 'Log In to Study Buddy' : 'Create Student Account'}
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                  STUDENT PORTAL
                 </span>
-              )}
-            </button>
-          </form>
+              </div>
 
-          {/* Current Account Card & Logout */}
-          <div className="pt-3 border-t border-slate-200 flex items-center justify-between text-xs">
-            <div className="truncate max-w-[220px]">
-              <span className="text-[10px] text-slate-400 block">Logged In As:</span>
-              <span className="font-semibold text-slate-800 truncate block">
-                {currentUser.fullName}
-              </span>
+              <form onSubmit={handleSubmit} className="space-y-3 text-xs">
+                {studentMode === 'signup' && (
+                  <div>
+                    <label className="block text-slate-700 font-bold mb-1">Full Name</label>
+                    <div className="relative">
+                      <User className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                      <input
+                        type="text"
+                        required
+                        value={fullName}
+                        onChange={(e) => setFullName(e.target.value)}
+                        placeholder="e.g. Maria Santos"
+                        className="w-full pl-9 pr-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500 font-medium"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">
+                    {studentMode === 'signup' ? 'Student Email' : 'Email Address'}
+                  </label>
+                  <div className="relative">
+                    <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                    <input
+                      type="email"
+                      required
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="student@university.edu"
+                      className="w-full pl-9 pr-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500 font-medium"
+                    />
+                  </div>
+                </div>
+
+                {studentMode !== 'forgot_password' && (
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-slate-700 font-bold">Password</label>
+                      {studentMode === 'login' && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setStudentMode('forgot_password');
+                            setErrorMessage(null);
+                          }}
+                          className="text-[11px] font-bold text-sky-700 hover:underline cursor-pointer"
+                        >
+                          Forgot Password?
+                        </button>
+                      )}
+                    </div>
+                    <div className="relative">
+                      <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                      <input
+                        type="password"
+                        required
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="••••••••"
+                        className="w-full pl-9 pr-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500 font-medium"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {studentMode === 'signup' && (
+                  <>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                      <div>
+                        <label className="block text-slate-700 font-bold mb-1">Course / Program</label>
+                        <div className="relative">
+                          <GraduationCap className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                          <input
+                            type="text"
+                            value={degree}
+                            onChange={(e) => setDegree(e.target.value)}
+                            placeholder="BS Computer Science"
+                            className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-700 font-bold mb-1">Job / Work Role</label>
+                        <div className="relative">
+                          <Briefcase className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                          <input
+                            type="text"
+                            value={jobTitle}
+                            onChange={(e) => setJobTitle(e.target.value)}
+                            placeholder="Customer Support (20h/wk)"
+                            className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full py-3 bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white font-extrabold rounded-xl shadow-xs transition-colors mt-2 cursor-pointer flex items-center justify-center space-x-2"
+                >
+                  {loading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>{loadingMessage || 'Processing...'}</span>
+                    </>
+                  ) : (
+                    <span>
+                      {studentMode === 'login'
+                        ? 'LOG IN'
+                        : studentMode === 'signup'
+                        ? 'REGISTER NEW STUDENT'
+                        : 'SEND RECOVERY EMAIL'}
+                    </span>
+                  )}
+                </button>
+              </form>
+
+              {/* Quick toggle between Login and Sign up */}
+              <div className="text-center pt-2 border-t border-slate-100 text-xs text-slate-500">
+                {studentMode === 'login' ? (
+                  <span>
+                    Need a student account?{' '}
+                    <button
+                      type="button"
+                      onClick={() => switchStudentMode('signup')}
+                      className="font-bold text-sky-700 hover:underline cursor-pointer"
+                    >
+                      REGISTER NEW STUDENT
+                    </button>
+                  </span>
+                ) : (
+                  <span>
+                    Already registered?{' '}
+                    <button
+                      type="button"
+                      onClick={() => switchStudentMode('login')}
+                      className="font-bold text-sky-700 hover:underline cursor-pointer"
+                    >
+                      Return to Log In
+                    </button>
+                  </span>
+                )}
+              </div>
             </div>
+          )}
 
-            <button
-              type="button"
-              onClick={handleLogout}
-              className="inline-flex items-center space-x-1 px-2.5 py-1 text-red-600 hover:bg-red-50 rounded-lg font-semibold border border-red-200 transition-colors cursor-pointer"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              <span>Log Out</span>
-            </button>
-          </div>
+          {/* ========================================================= */}
+          {/* 2. ADMINISTRATOR LOGIN INTERFACE */}
+          {/* ========================================================= */}
+          {loginType === 'admin' && (
+            <div className="space-y-4">
+              <div className="p-3.5 bg-slate-900 text-white rounded-2xl space-y-1">
+                <div className="flex items-center space-x-2">
+                  <Shield className="w-4 h-4 text-amber-400" />
+                  <span className="font-extrabold text-xs uppercase tracking-wider text-amber-300">
+                    Protected Administrative Access
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  Only accounts granted Administrator or Super Administrator authority can access administrative functions. Unauthorized attempts are audited.
+                </p>
+              </div>
+
+              <form onSubmit={handleSubmit} className="space-y-3 text-xs">
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">
+                    Administrator Email
+                  </label>
+                  <div className="relative">
+                    <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                    <input
+                      type="email"
+                      required
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="admin@university.edu"
+                      className="w-full pl-9 pr-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900 font-medium"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-slate-700 font-bold">Password</label>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!email.trim()) {
+                          setErrorMessage('Please enter your administrator email first.');
+                          return;
+                        }
+                        setLoading(true);
+                        const res = await sendPasswordResetEmail(email.trim());
+                        setLoading(false);
+                        if (res.success) {
+                          setSuccessMessage('Password recovery link dispatched to administrator email.');
+                        } else {
+                          setErrorMessage(res.error || 'Failed to send recovery link.');
+                        }
+                      }}
+                      className="text-[11px] font-bold text-sky-700 hover:underline cursor-pointer"
+                    >
+                      FORGOT PASSWORD
+                    </button>
+                  </div>
+                  <div className="relative">
+                    <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                    <input
+                      type="password"
+                      required
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="••••••••"
+                      className="w-full pl-9 pr-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900 font-medium"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full py-3 bg-slate-900 hover:bg-black disabled:opacity-60 text-white font-extrabold rounded-xl shadow-xs transition-colors mt-2 cursor-pointer flex items-center justify-center space-x-2"
+                >
+                  {loading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+                      <span>{loadingMessage || 'Verifying administrative permissions...'}</span>
+                    </>
+                  ) : (
+                    <>
+                      <ShieldCheck className="w-4 h-4 text-amber-400" />
+                      <span>ADMINISTRATOR SIGN IN</span>
+                    </>
+                  )}
+                </button>
+              </form>
+
+              {/* Initial Super Administrator Activation Callout (Part 3) */}
+              <div className="p-3.5 bg-amber-50/80 border border-amber-200 rounded-2xl space-y-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-extrabold text-amber-950 flex items-center space-x-1.5">
+                    <Sparkles className="w-4 h-4 text-amber-600" />
+                    <span>Initial Super Administrator Setup</span>
+                  </span>
+                  <span className="px-2 py-0.5 bg-amber-200/60 text-amber-900 rounded-full font-bold text-[10px]">
+                    One-Time Provision
+                  </span>
+                </div>
+
+                <p className="text-[11px] text-amber-900 leading-snug">
+                  Initial administrator: <strong>Noel Historillo</strong> (<code className="font-mono text-[10px]">historillo.noel1994@gmail.com</code>).
+                </p>
+
+                <button
+                  type="button"
+                  onClick={handleBootstrapInitialAdmin}
+                  disabled={isBootstrappingInitial}
+                  className="w-full py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-bold rounded-xl transition-colors cursor-pointer flex items-center justify-center space-x-1.5 shadow-2xs"
+                >
+                  {isBootstrappingInitial ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Activating Super Administrator...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>Activate Initial Super Administrator (Noel Historillo)</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -1,0 +1,312 @@
+{
+  "bootstrapped": true,
+  "initialAdminEmail": "historillo.noel1994@gmail.com",
+  "users": {
+    "historillo.noel1994@gmail.com": {
+      "id": "admin-super-1790776012857",
+      "email": "historillo.noel1994@gmail.com",
+      "fullName": "Noel Historillo Jr",
+      "role": "super_admin",
+      "assignedAt": "2026-09-30T13:46:52.857Z",
+      "assignedBy": "initial_bootstrap",
+      "accountStatus": "active",
+      "institution": "NBS College",
+      "lastLogin": "2026-09-30T14:10:53.630Z",
+      "course": "BS Entrepreneurship"
+    },
+    "juan.delacruz@student.univ.edu": {
+      "id": "usr-working-student-01",
+      "email": "juan.delacruz@student.univ.edu",
+      "fullName": "Juan Dela Cruz",
+      "role": "student",
+      "assignedAt": "2026-09-30T13:42:53.087Z",
+      "assignedBy": "public_registration",
+      "accountStatus": "active",
+      "institution": "State Metropolitan University",
+      "course": "BS Business Administration"
+    },
+    "maria.test@student.univ.edu": {
+      "id": "usr-1790775791488",
+      "email": "maria.test@student.univ.edu",
+      "fullName": "maria.test",
+      "role": "student",
+      "assignedAt": "2026-09-30T13:43:11.488Z",
+      "assignedBy": "public_registration",
+      "accountStatus": "active",
+      "institution": "State Metropolitan University",
+      "course": "College Student",
+      "lastLogin": "2026-09-30T13:43:11.488Z"
+    },
+    "noel.historillo@student.univ.edu": {
+      "id": "088ee0e2-ff67-42f9-8756-a7f4adde1353",
+      "email": "noel.historillo@student.univ.edu",
+      "fullName": "Noel Historillo",
+      "role": "student",
+      "assignedAt": "2026-09-30T13:44:35.157Z",
+      "assignedBy": "public_registration",
+      "accountStatus": "active",
+      "institution": "State Metropolitan University",
+      "course": "BS Entrepreneurship",
+      "lastLogin": "2026-09-30T13:46:42.902Z"
+    }
+  },
+  "invitations": [],
+  "auditLogs": [
+    {
+      "id": "log-1790777578833-a5ba7a",
+      "adminUserId": "admin-super-1790776012857",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "ADMIN_ACCESS_BLOCKED_MFA_REQUIRED",
+      "details": {
+        "path": "/api/admin/overview",
+        "method": "GET",
+        "currentAal": "none",
+        "requiresEnrollment": true
+      },
+      "ipAddress": "127.0.0.1",
+      "createdAt": "2026-09-30T14:12:58.833Z"
+    },
+    {
+      "id": "log-1790777578827-aa38d5",
+      "adminUserId": "admin-super-1790776012857",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "MFA_AUTHENTICATOR_UNENROLLED",
+      "details": {
+        "note": "Multifactor authentication disabled by account holder."
+      },
+      "ipAddress": "127.0.0.1",
+      "createdAt": "2026-09-30T14:12:58.827Z"
+    },
+    {
+      "id": "log-1790777578813-76ead7",
+      "adminUserId": "admin-super-1790776012857",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "MFA_ENROLLMENT_VERIFIED",
+      "details": {
+        "note": "TOTP Multifactor Authentication successfully activated and verified.",
+        "aal": "aal2"
+      },
+      "ipAddress": "127.0.0.1",
+      "createdAt": "2026-09-30T14:12:58.813Z"
+    },
+    {
+      "id": "log-1790777578805-2bcb4f",
+      "adminUserId": "admin-super-1790776012857",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "MFA_VERIFICATION_FAILED",
+      "details": {
+        "note": "Incorrect 6-digit TOTP verification code entered."
+      },
+      "ipAddress": "127.0.0.1",
+      "createdAt": "2026-09-30T14:12:58.805Z"
+    },
+    {
+      "id": "log-1790777578753-d9bec2",
+      "adminUserId": "admin-super-1790776012857",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "ADMIN_ACCESS_BLOCKED_MFA_REQUIRED",
+      "details": {
+        "path": "/api/admin/overview",
+        "method": "GET",
+        "currentAal": "none",
+        "requiresEnrollment": true
+      },
+      "ipAddress": "127.0.0.1",
+      "createdAt": "2026-09-30T14:12:58.753Z"
+    },
+    {
+      "id": "log-1790776012857-d0b86b",
+      "adminUserId": "admin-super-1790776012857",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "INITIAL_BOOTSTRAP",
+      "targetUserId": "admin-super-1790776012857",
+      "targetUserEmail": "historillo.noel1994@gmail.com",
+      "details": {
+        "message": "Initial Super Administrator Noel Historillo (historillo.noel1994@gmail.com) activated."
+      },
+      "ipAddress": "136.158.0.243",
+      "createdAt": "2026-09-30T13:46:52.857Z"
+    },
+    {
+      "id": "log-1790776012648-ebb802",
+      "adminUserId": "admin-super-1790776012648",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "INITIAL_BOOTSTRAP",
+      "targetUserId": "admin-super-1790776012648",
+      "targetUserEmail": "historillo.noel1994@gmail.com",
+      "details": {
+        "message": "Initial Super Administrator Noel Historillo (historillo.noel1994@gmail.com) activated."
+      },
+      "ipAddress": "136.158.0.243",
+      "createdAt": "2026-09-30T13:46:52.648Z"
+    },
+    {
+      "id": "log-1790776012174-06b0bf",
+      "adminUserId": "admin-super-1790776012174",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "INITIAL_BOOTSTRAP",
+      "targetUserId": "admin-super-1790776012174",
+      "targetUserEmail": "historillo.noel1994@gmail.com",
+      "details": {
+        "message": "Initial Super Administrator Noel Historillo (historillo.noel1994@gmail.com) activated."
+      },
+      "ipAddress": "136.158.0.243",
+      "createdAt": "2026-09-30T13:46:52.174Z"
+    },
+    {
+      "id": "log-1790776011963-b5f48d",
+      "adminUserId": "admin-super-1790776011963",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "INITIAL_BOOTSTRAP",
+      "targetUserId": "admin-super-1790776011963",
+      "targetUserEmail": "historillo.noel1994@gmail.com",
+      "details": {
+        "message": "Initial Super Administrator Noel Historillo (historillo.noel1994@gmail.com) activated."
+      },
+      "ipAddress": "136.158.0.243",
+      "createdAt": "2026-09-30T13:46:51.963Z"
+    },
+    {
+      "id": "log-1790776011766-6f12e1",
+      "adminUserId": "admin-super-1790776011766",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "INITIAL_BOOTSTRAP",
+      "targetUserId": "admin-super-1790776011766",
+      "targetUserEmail": "historillo.noel1994@gmail.com",
+      "details": {
+        "message": "Initial Super Administrator Noel Historillo (historillo.noel1994@gmail.com) activated."
+      },
+      "ipAddress": "136.158.0.243",
+      "createdAt": "2026-09-30T13:46:51.766Z"
+    },
+    {
+      "id": "log-1790776011145-7f7332",
+      "adminUserId": "admin-super-1790776011145",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "INITIAL_BOOTSTRAP",
+      "targetUserId": "admin-super-1790776011145",
+      "targetUserEmail": "historillo.noel1994@gmail.com",
+      "details": {
+        "message": "Initial Super Administrator Noel Historillo (historillo.noel1994@gmail.com) activated."
+      },
+      "ipAddress": "136.158.0.243",
+      "createdAt": "2026-09-30T13:46:51.145Z"
+    },
+    {
+      "id": "log-1790776010945-56ef4e",
+      "adminUserId": "admin-super-1790776010945",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "INITIAL_BOOTSTRAP",
+      "targetUserId": "admin-super-1790776010945",
+      "targetUserEmail": "historillo.noel1994@gmail.com",
+      "details": {
+        "message": "Initial Super Administrator Noel Historillo (historillo.noel1994@gmail.com) activated."
+      },
+      "ipAddress": "136.158.0.243",
+      "createdAt": "2026-09-30T13:46:50.945Z"
+    },
+    {
+      "id": "log-1790776010460-4ede13",
+      "adminUserId": "admin-super-1790776010460",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "INITIAL_BOOTSTRAP",
+      "targetUserId": "admin-super-1790776010460",
+      "targetUserEmail": "historillo.noel1994@gmail.com",
+      "details": {
+        "message": "Initial Super Administrator Noel Historillo (historillo.noel1994@gmail.com) activated."
+      },
+      "ipAddress": "136.158.0.243",
+      "createdAt": "2026-09-30T13:46:50.460Z"
+    },
+    {
+      "id": "log-1790776009463-3bd12e",
+      "adminUserId": "admin-super-1790776009463",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "INITIAL_BOOTSTRAP",
+      "targetUserId": "admin-super-1790776009463",
+      "targetUserEmail": "historillo.noel1994@gmail.com",
+      "details": {
+        "message": "Initial Super Administrator Noel Historillo (historillo.noel1994@gmail.com) activated."
+      },
+      "ipAddress": "136.158.0.243",
+      "createdAt": "2026-09-30T13:46:49.463Z"
+    },
+    {
+      "id": "log-1790775952563-6bc885",
+      "adminUserId": "admin-super-1790775952563",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "INITIAL_BOOTSTRAP",
+      "targetUserId": "admin-super-1790775952563",
+      "targetUserEmail": "historillo.noel1994@gmail.com",
+      "details": {
+        "message": "Initial Super Administrator Noel Historillo (historillo.noel1994@gmail.com) activated."
+      },
+      "ipAddress": "136.158.0.243",
+      "createdAt": "2026-09-30T13:45:52.563Z"
+    },
+    {
+      "id": "log-1790775943849-e195f7",
+      "adminUserId": "admin-super-1790775943849",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "INITIAL_BOOTSTRAP",
+      "targetUserId": "admin-super-1790775943849",
+      "targetUserEmail": "historillo.noel1994@gmail.com",
+      "details": {
+        "message": "Initial Super Administrator Noel Historillo (historillo.noel1994@gmail.com) activated."
+      },
+      "ipAddress": "136.158.0.243",
+      "createdAt": "2026-09-30T13:45:43.850Z"
+    },
+    {
+      "id": "log-1790775817027-bc9135",
+      "adminUserId": "anonymous",
+      "adminEmail": "admin@test.edu",
+      "action": "UNAUTHORIZED_SUPER_ADMIN_ATTEMPT",
+      "details": {
+        "path": "/api/admin/system-config",
+        "method": "GET"
+      },
+      "ipAddress": "127.0.0.1",
+      "createdAt": "2026-09-30T13:43:37.027Z"
+    },
+    {
+      "id": "log-1790775801063-3d6b2d",
+      "adminUserId": "anonymous",
+      "adminEmail": "maria.test@student.univ.edu",
+      "action": "UNAUTHORIZED_ADMIN_ACCESS_ATTEMPT",
+      "details": {
+        "path": "/api/admin/overview",
+        "method": "GET"
+      },
+      "ipAddress": "127.0.0.1",
+      "createdAt": "2026-09-30T13:43:21.063Z"
+    },
+    {
+      "id": "log-bootstrap-01",
+      "adminUserId": "system",
+      "adminEmail": "system@studybuddy.internal",
+      "action": "INITIAL_BOOTSTRAP",
+      "targetUserId": "admin-super-noel-01",
+      "targetUserEmail": "historillo.noel1994@gmail.com",
+      "details": {
+        "note": "Initial Super Administrator Noel Historillo provisioned with full administrative privileges."
+      },
+      "ipAddress": "127.0.0.1",
+      "createdAt": "2026-09-30T13:42:53.087Z"
+    }
+  ],
+  "systemConfig": {
+    "allowedModels": [
+      "gemini-3.8-flash",
+      "gemini-flash-latest",
+      "gemini-3.1-flash-lite"
+    ],
+    "defaultDifficulty": "medium",
+    "maxQuestionCount": 100,
+    "rateLimitRpm": 60,
+    "cloudSettingsRestricted": true,
+    "developerAccessRoleRequired": "super_admin"
+  },
+  "mfaFactors": {},
+  "mfaSessions": {}
+}

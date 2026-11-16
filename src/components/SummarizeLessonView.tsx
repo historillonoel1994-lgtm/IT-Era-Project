@@ -4,6 +4,7 @@ import {
   Sparkles,
   FileText,
   AlertCircle,
+  AlertTriangle,
   Copy,
   Check,
   Bookmark,
@@ -14,10 +15,17 @@ import {
   Key,
   ListChecks,
   ExternalLink,
+  Loader2,
+  Upload,
 } from 'lucide-react';
-import { LessonDocument, LessonSummary } from '../types';
+import { LessonDocument, LessonSummary, DocumentProcessingStatus } from '../types';
 import { summarizeLesson } from '../services/api';
-import { getStoredSummary, saveStoredSummary } from '../services/storage';
+import {
+  getStoredSummary,
+  saveStoredSummary,
+  loadAndReconstructLesson,
+  isPlaceholderContent,
+} from '../services/storage';
 import { PRECOMPUTED_SUMMARIES } from '../data/precomputedData';
 import { ResponsibleAiBanner } from './ResponsibleAiBanner';
 import { CitationModal } from './CitationModal';
@@ -36,6 +44,12 @@ export const SummarizeLessonView: React.FC<SummarizeLessonViewProps> = ({
   onNavigateToTutor,
   onOpenUpload,
 }) => {
+  const [currentDoc, setCurrentDoc] = useState<LessonDocument>(lesson);
+  const [docStatus, setDocStatus] = useState<DocumentProcessingStatus>(() => {
+    if (isPlaceholderContent(lesson.pages)) return lesson.processingStatus || 'reprocessing_required';
+    return lesson.processingStatus || 'ready';
+  });
+  const [isReprocessing, setIsReprocessing] = useState<boolean>(false);
   const [summary, setSummary] = useState<LessonSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,44 +59,103 @@ export const SummarizeLessonView: React.FC<SummarizeLessonViewProps> = ({
   const [inspectPage, setInspectPage] = useState<number | string | null>(null);
   const [inspectExcerpt, setInspectExcerpt] = useState<string | undefined>(undefined);
 
+  // Auto-verify document status and load full pages if incomplete
   useEffect(() => {
-    // Check if we already have a cached summary for this lesson
-    const cached = getStoredSummary(lesson.id);
-    if (cached) {
-      setSummary(cached);
-      setError(null);
-    } else {
-      handleGenerateSummary();
-    }
-  }, [lesson.id]);
+    setCurrentDoc(lesson);
+    const isPlaceholder = isPlaceholderContent(lesson.pages);
 
-  const handleGenerateSummary = async () => {
+    if (isPlaceholder || lesson.processingStatus === 'reprocessing_required') {
+      setDocStatus('processing');
+      setIsReprocessing(true);
+      loadAndReconstructLesson(lesson.id)
+        .then((reconstructed) => {
+          if (!isPlaceholderContent(reconstructed.pages)) {
+            setCurrentDoc(reconstructed);
+            setDocStatus('ready');
+            const cached = getStoredSummary(reconstructed.id);
+            if (cached) {
+              setSummary(cached);
+              setError(null);
+            } else {
+              handleGenerateSummary(reconstructed);
+            }
+          } else {
+            setDocStatus('reprocessing_required');
+          }
+        })
+        .catch(() => {
+          setDocStatus('reprocessing_required');
+        })
+        .finally(() => {
+          setIsReprocessing(false);
+        });
+    } else {
+      setDocStatus('ready');
+      const cached = getStoredSummary(lesson.id);
+      if (cached) {
+        setSummary(cached);
+        setError(null);
+      } else {
+        handleGenerateSummary(lesson);
+      }
+    }
+  }, [lesson.id, lesson.pages, lesson.processingStatus]);
+
+  const handleReprocessDocument = async () => {
+    setIsReprocessing(true);
+    setDocStatus('processing');
+    try {
+      const reconstructed = await loadAndReconstructLesson(currentDoc.id, { forceReprocess: true });
+      if (!isPlaceholderContent(reconstructed.pages)) {
+        setCurrentDoc(reconstructed);
+        setDocStatus('ready');
+        await handleGenerateSummary(reconstructed);
+      } else {
+        setDocStatus('reprocessing_required');
+      }
+    } catch {
+      setDocStatus('reprocessing_required');
+    } finally {
+      setIsReprocessing(false);
+    }
+  };
+
+  const handleGenerateSummary = async (targetDoc?: LessonDocument) => {
+    const docToUse = targetDoc || currentDoc;
+    if (isPlaceholderContent(docToUse.pages)) {
+      setDocStatus('reprocessing_required');
+      return;
+    }
+
     setLoading(true);
     setError(null);
     try {
       const result = await summarizeLesson({
-        pages: lesson.pages,
-        lessonTitle: lesson.title,
-        subject: lesson.subject,
+        pages: docToUse.pages,
+        lessonTitle: docToUse.title,
+        subject: docToUse.subject,
+        lessonId: docToUse.id,
+        documentId: docToUse.id,
+        filename: docToUse.fileName,
       });
       setSummary(result);
-      saveStoredSummary(lesson.id, result);
+      saveStoredSummary(docToUse.id, result);
     } catch (err: any) {
       console.error('Error generating summary:', err);
       // Resilient fallback for sample lessons during 503 high traffic spikes
-      const fallback = PRECOMPUTED_SUMMARIES[lesson.id];
+      const fallback = PRECOMPUTED_SUMMARIES[docToUse.id];
       if (fallback) {
         setSummary(fallback);
-        saveStoredSummary(lesson.id, fallback);
+        saveStoredSummary(docToUse.id, fallback);
         setError(null);
-      } else if (lesson.pages && lesson.pages.length > 0) {
-        // High-yield instant fallback from lesson pages so study session is never interrupted
-        const page1 = lesson.pages[0];
+      } else if (docToUse.pages && docToUse.pages.length > 0 && !isPlaceholderContent(docToUse.pages)) {
+        // High-yield instant fallback from verified lesson pages so study session is never interrupted
+        const page1 = docToUse.pages[0];
         const clientSummary: LessonSummary = {
-          mainTopic: lesson.title,
+          mainTopic: docToUse.title,
           summary: page1.text.split('\n').find((l) => l.trim().length > 30) || page1.text.slice(0, 260),
           simpleExplanation: page1.text.split('\n').find((l) => l.trim().length > 30) || page1.text.slice(0, 220),
-          keyPoints: lesson.pages.slice(0, 6).map((p, idx) => {
+          keyPoints: docToUse.pages.slice(0, 6).map((p, idx) => {
             const firstSentence = p.text.match(/[^.!?]+[.!?]+/)?.[0]?.trim() || p.text.slice(0, 120);
             return {
               idea: firstSentence,
@@ -90,7 +163,7 @@ export const SummarizeLessonView: React.FC<SummarizeLessonViewProps> = ({
               citationExcerpt: firstSentence,
             };
           }),
-          keyIdeas: lesson.pages.slice(0, 5).map((p, idx) => {
+          keyIdeas: docToUse.pages.slice(0, 5).map((p, idx) => {
             const firstSentence = p.text.match(/[^.!?]+[.!?]+/)?.[0]?.trim() || p.text.slice(0, 100);
             return {
               idea: firstSentence,
@@ -100,24 +173,24 @@ export const SummarizeLessonView: React.FC<SummarizeLessonViewProps> = ({
           }),
           importantTerms: [
             {
-              term: lesson.title.split(/[:\-\s]/)[0] || 'Core Subject',
+              term: docToUse.title.split(/[:\-\s]/)[0] || 'Core Subject',
               definition: 'Foundational academic topic covered in this document.',
               sourcePage: 1,
             },
           ],
           studyPointers: [
             {
-              pointer: `Focus on mastering the core principles on pages 1 to ${lesson.totalPages} for exams and recitations.`,
+              pointer: `Focus on mastering the core principles on pages 1 to ${docToUse.totalPages} for exams and recitations.`,
               sourcePage: 1,
               category: 'exam',
             },
           ],
           relationshipsBetweenTopics: [
-            `Topics across pages 1 to ${lesson.totalPages} build progressively from foundational principles to applied problem-solving.`
+            `Topics across pages 1 to ${docToUse.totalPages} build progressively from foundational principles to applied problem-solving.`
           ],
           keyTakeaways: [
             {
-              takeaway: `Review key principles on pages 1 to ${lesson.totalPages} for assignments and exam preparation.`,
+              takeaway: `Review key principles on pages 1 to ${docToUse.totalPages} for assignments and exam preparation.`,
               sourcePage: 1,
             },
           ],
@@ -125,7 +198,7 @@ export const SummarizeLessonView: React.FC<SummarizeLessonViewProps> = ({
             {
               heading: 'Essential Document Review',
               bulletPoints: [
-                `Extracted directly from ${lesson.title}.`,
+                `Extracted directly from ${docToUse.title}.`,
                 'Click "Regenerate" at any time to re-synthesize with full AI reasoning.',
               ],
               sourcePage: 1,
@@ -134,7 +207,7 @@ export const SummarizeLessonView: React.FC<SummarizeLessonViewProps> = ({
           generatedAt: new Date().toISOString(),
         };
         setSummary(clientSummary);
-        saveStoredSummary(lesson.id, clientSummary);
+        saveStoredSummary(docToUse.id, clientSummary);
         setError(null);
       } else {
         setError(err.message || 'Unable to generate summary. Please check your network or try again.');
@@ -209,21 +282,21 @@ ${summary.quickReviewNotes
                   Feature 1 • Lesson Summarizer
                 </span>
                 <span className="text-xs text-slate-400">
-                  {lesson.totalPages} Pages Analyzed
+                  {currentDoc.totalPages} Pages Analyzed
                 </span>
               </div>
               <h2 className="text-xl font-bold text-slate-900 mt-1">
-                {lesson.title}
+                {currentDoc.title}
               </h2>
               <p className="text-xs text-slate-500 font-medium">
-                Course: <span className="text-slate-700 font-semibold">{lesson.subject}</span>
+                Course: <span className="text-slate-700 font-semibold">{currentDoc.subject}</span>
               </p>
             </div>
           </div>
 
           <div className="flex items-center space-x-2.5 shrink-0">
             <button
-              onClick={handleGenerateSummary}
+              onClick={() => handleGenerateSummary()}
               disabled={loading}
               className="px-3.5 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl flex items-center space-x-1.5 transition-colors disabled:opacity-50"
               title="Regenerate summary with AI"
@@ -252,8 +325,109 @@ ${summary.quickReviewNotes
       {/* Prominent Safeguard Banner */}
       <ResponsibleAiBanner />
 
+      {/* Document Processing Status Alert */}
+      {docStatus === 'reprocessing_required' && (
+        <div className="bg-amber-50 border border-amber-300 rounded-2xl p-5 text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xs">
+          <div className="flex items-start space-x-3.5">
+            <div className="p-2.5 bg-amber-200/60 rounded-xl text-amber-800 shrink-0">
+              <AlertTriangle className="w-5 h-5 text-amber-700" />
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center space-x-2">
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-amber-900 bg-amber-200/80 px-2 py-0.5 rounded-full border border-amber-300/80">
+                  Reprocessing Required
+                </span>
+                <span className="text-xs font-bold text-amber-900">
+                  {currentDoc.title}
+                </span>
+              </div>
+              <p className="text-sm font-bold text-amber-950">
+                This learning material needs to be processed again to access its complete content.
+              </p>
+              <p className="text-xs text-amber-800/90 leading-relaxed">
+                Before Study Buddy can analyze this material, generate summaries, or play page-by-page audio lessons, its complete content must be extracted. Click below to reprocess.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center space-x-2 shrink-0">
+            <button
+              onClick={handleReprocessDocument}
+              disabled={isReprocessing}
+              className="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center space-x-1.5 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isReprocessing ? 'animate-spin' : ''}`} />
+              <span>{isReprocessing ? 'Processing...' : 'Reprocess Learning Material'}</span>
+            </button>
+            <button
+              onClick={onOpenUpload}
+              className="px-3 py-2 bg-white hover:bg-amber-100 text-amber-900 border border-amber-300 font-semibold text-xs rounded-xl transition-colors cursor-pointer"
+            >
+              Upload New File
+            </button>
+          </div>
+        </div>
+      )}
+
+      {docStatus === 'processing_failed' && (
+        <div className="bg-rose-50 border border-rose-300 rounded-2xl p-5 text-rose-950 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xs">
+          <div className="flex items-start space-x-3.5">
+            <div className="p-2.5 bg-rose-200/60 rounded-xl text-rose-800 shrink-0">
+              <AlertTriangle className="w-5 h-5 text-rose-700" />
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center space-x-2">
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-rose-900 bg-rose-200/80 px-2 py-0.5 rounded-full border border-rose-300/80">
+                  Processing Failed
+                </span>
+                <span className="text-xs font-bold text-rose-900">
+                  {currentDoc.title}
+                </span>
+              </div>
+              <p className="text-sm font-bold text-rose-950">
+                Text extraction could not be completed for this file.
+              </p>
+              <p className="text-xs text-rose-800/90 leading-relaxed">
+                The stored file could not be parsed into readable pages. You can attempt to reprocess or upload a clean PDF, DOCX, or text file.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center space-x-2 shrink-0">
+            <button
+              onClick={handleReprocessDocument}
+              disabled={isReprocessing}
+              className="px-4 py-2 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center space-x-1.5 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isReprocessing ? 'animate-spin' : ''}`} />
+              <span>Retry Processing</span>
+            </button>
+            <button
+              onClick={onOpenUpload}
+              className="px-3 py-2 bg-white hover:bg-rose-100 text-rose-900 border border-rose-300 font-semibold text-xs rounded-xl transition-colors cursor-pointer"
+            >
+              Upload New File
+            </button>
+          </div>
+        </div>
+      )}
+
+      {docStatus === 'processing' && (
+        <div className="bg-sky-50 border border-sky-300 rounded-2xl p-4 text-sky-950 flex items-center space-x-3 shadow-xs">
+          <Loader2 className="w-5 h-5 text-sky-600 animate-spin shrink-0" />
+          <div>
+            <span className="text-[10px] font-extrabold uppercase tracking-wider text-sky-900 bg-sky-200/80 px-2 py-0.5 rounded-full border border-sky-300/80 inline-block mb-0.5">
+              Processing Document
+            </span>
+            <p className="text-xs sm:text-sm font-bold text-sky-950">
+              Extracting and reconstructing complete page contents for {currentDoc.title}...
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Full Lesson Audio Center (Continuous Play & Summary Option) */}
-      <FullLessonAudioPlayer lesson={lesson} summary={summary} />
+      {docStatus === 'ready' && (
+        <FullLessonAudioPlayer lesson={currentDoc} summary={summary} />
+      )}
 
       {/* Error state */}
       {error && (
@@ -263,7 +437,7 @@ ${summary.quickReviewNotes
             <span className="font-semibold">Unable to complete summarization:</span>
             <p className="text-xs text-red-700">{error}</p>
             <button
-              onClick={handleGenerateSummary}
+              onClick={() => handleGenerateSummary()}
               className="mt-2 px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-medium"
             >
               Retry Summarizing
@@ -606,7 +780,7 @@ ${summary.quickReviewNotes
           isOpen={inspectPage !== null}
           onClose={() => setInspectPage(null)}
           pageNumber={inspectPage}
-          lesson={lesson}
+          lesson={currentDoc}
           highlightExcerpt={inspectExcerpt}
         />
       )}

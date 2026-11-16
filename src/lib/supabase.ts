@@ -176,12 +176,15 @@ export async function signUpStudent(params: {
   }
 
   try {
+    const cleanEmail = params.email.trim();
+    const cleanFullName = params.fullName.trim() || cleanEmail.split('@')[0];
+
     const { data, error } = await supabase.auth.signUp({
-      email: params.email.trim(),
+      email: cleanEmail,
       password: params.password,
       options: {
         data: {
-          full_name: params.fullName.trim(),
+          full_name: cleanFullName,
           degree: params.degree?.trim() || '',
           job_title: params.jobTitle?.trim() || '',
         },
@@ -192,10 +195,18 @@ export async function signUpStudent(params: {
       return { user: null, error: error.message };
     }
 
-    if (data.user) {
-      // Automatically populate profiles & study_progress
+    // Supabase returns a user with empty identities array when email already exists and confirmation is enabled
+    if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+      return {
+        user: null,
+        error: 'An account with this email is already registered. Please log in instead.',
+      };
+    }
+
+    // Only write profiles & study_progress directly from client if an active authenticated session exists (RLS requires auth.uid())
+    if (data.user && data.session) {
       await ensureUserProfileAndProgress(data.user, {
-        fullName: params.fullName.trim(),
+        fullName: cleanFullName,
         degree: params.degree?.trim() || '',
         jobTitle: params.jobTitle?.trim() || '',
       });
@@ -277,9 +288,11 @@ export async function ensureUserProfileAndProgress(
     id: user.id,
     fullName,
     email: user.email || '',
+    role: (user.email?.toLowerCase() === 'historillo.noel1994@gmail.com' ? 'super_admin' : 'student'),
     degree,
     jobTitle,
     avatarSeed,
+    accountStatus: 'active',
   };
 
   // 1. Populate profiles if missing
@@ -309,9 +322,9 @@ export async function ensureUserProfileAndProgress(
         .select()
         .maybeSingle();
 
-      // If failed due to extra columns (e.g. avatar_seed, degree, job_title not in user's schema), fallback to basic columns
+      // If failed due to extra columns (e.g. avatar_seed, degree, job_title not in user's schema), fallback to email+name, then minimal (id, full_name)
       if (insertProfileErr) {
-        console.error('Profile DB error (detailed):', insertProfileErr);
+        console.warn('Profile DB insert fallback (detailed -> basic):', insertProfileErr.message);
         const retryBasic = await supabase
           .from('profiles')
           .insert({
@@ -323,7 +336,24 @@ export async function ensureUserProfileAndProgress(
           .maybeSingle();
 
         if (retryBasic.error) {
-          console.error('Profile DB error (fallback):', retryBasic.error);
+          console.warn('Profile DB insert fallback (basic -> minimal):', retryBasic.error.message);
+          const retryMinimal = await supabase
+            .from('profiles')
+            .upsert(
+              {
+                id: user.id,
+                full_name: fullName,
+              },
+              { onConflict: 'id' }
+            )
+            .select()
+            .maybeSingle();
+
+          if (retryMinimal.error) {
+            console.error('Profile DB error (minimal fallback):', retryMinimal.error);
+          } else {
+            insertedProfile = retryMinimal.data;
+          }
         } else {
           insertedProfile = retryBasic.data;
         }
@@ -334,9 +364,11 @@ export async function ensureUserProfileAndProgress(
           id: insertedProfile.id || user.id,
           fullName: insertedProfile.full_name || fullName,
           email: insertedProfile.email || user.email || '',
+          role: (user.email?.toLowerCase() === 'historillo.noel1994@gmail.com' ? 'super_admin' : 'student'),
           degree: insertedProfile.degree || degree,
           jobTitle: insertedProfile.job_title || jobTitle,
           avatarSeed: insertedProfile.avatar_seed || avatarSeed,
+          accountStatus: 'active',
         };
       }
     } else {
@@ -344,11 +376,25 @@ export async function ensureUserProfileAndProgress(
         id: existingProfile.id,
         fullName: existingProfile.full_name || fullName,
         email: existingProfile.email || user.email || '',
+        role: (user.email?.toLowerCase() === 'historillo.noel1994@gmail.com' ? 'super_admin' : 'student'),
         degree: existingProfile.degree || degree,
         jobTitle: existingProfile.job_title || jobTitle,
         avatarSeed: existingProfile.avatar_seed || avatarSeed,
+        accountStatus: existingProfile.account_status || 'active',
       };
     }
+
+    // Verify role through protected backend
+    const verifiedRole = await verifyUserRoleWithServer({
+      email: profile.email,
+      userId: profile.id,
+      fullName: profile.fullName,
+      degree: profile.degree,
+      jobTitle: profile.jobTitle,
+      institution: profile.institution,
+    });
+    profile.role = verifiedRole.role;
+    profile.accountStatus = verifiedRole.accountStatus;
   } catch (profileErr) {
     console.error('Profile DB error:', profileErr);
   }
@@ -1199,5 +1245,724 @@ export async function logAskTutorQuestion(
     console.error('Exception writing to ask_tutor_logs:', err);
     return { success: false, error: err.message || 'Unknown error' };
   }
+}
+
+// ==============================================================
+// USER ACCOUNT MANAGEMENT & ADMINISTRATOR SECURITY CLIENT HELPERS
+// ==============================================================
+
+/**
+ * Verify user role and permissions through protected server authorization
+ */
+export async function verifyUserRoleWithServer(params: {
+  email: string;
+  userId?: string;
+  fullName?: string;
+  degree?: string;
+  jobTitle?: string;
+  institution?: string;
+}): Promise<{
+  role: 'student' | 'admin' | 'super_admin';
+  accountStatus: 'active' | 'suspended' | 'pending';
+  isSuperAdmin: boolean;
+  isAdmin: boolean;
+  error?: string;
+}> {
+  try {
+    const res = await fetch('/api/auth/verify-role', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-user-email': params.email,
+      },
+      body: JSON.stringify(params),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      return {
+        role: 'student',
+        accountStatus: data.suspended ? 'suspended' : 'active',
+        isSuperAdmin: false,
+        isAdmin: false,
+        error: data.error || 'Role verification failed.',
+      };
+    }
+
+    return {
+      role: data.role || 'student',
+      accountStatus: data.accountStatus || 'active',
+      isSuperAdmin: Boolean(data.isSuperAdmin),
+      isAdmin: Boolean(data.isAdmin),
+    };
+  } catch (err: any) {
+    console.error('Server role verification network error:', err);
+    // Safe default to student if server check fails
+    return {
+      role: 'student',
+      accountStatus: 'active',
+      isSuperAdmin: false,
+      isAdmin: false,
+      error: err.message,
+    };
+  }
+}
+
+/**
+ * Trigger the protected one-time initial Super Administrator setup
+ */
+export async function triggerInitialSuperAdminBootstrap(params?: {
+  email?: string;
+  fullName?: string;
+}): Promise<{ success: boolean; message: string; user?: any }> {
+  try {
+    const res = await fetch('/api/admin/bootstrap-initial', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params || {}),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      return { success: false, message: data.error || 'Bootstrap failed.' };
+    }
+    return { success: true, message: data.message, user: data.user };
+  } catch (err: any) {
+    return { success: false, message: err.message || 'Network error triggering bootstrap.' };
+  }
+}
+
+/**
+ * Check Initial Super Administrator status
+ */
+export async function fetchBootstrapStatus(): Promise<{
+  bootstrapped: boolean;
+  initialAdminEmail: string;
+  initialAdminName: string;
+  superAdminCount: number;
+}> {
+  try {
+    const res = await fetch('/api/admin/bootstrap-status');
+    if (!res.ok) throw new Error('Status failed');
+    return await res.json();
+  } catch {
+    return {
+      bootstrapped: true,
+      initialAdminEmail: 'historillo.noel1994@gmail.com',
+      initialAdminName: 'Noel Historillo',
+      superAdminCount: 1,
+    };
+  }
+}
+
+/**
+ * Update authenticated user profile data
+ */
+export async function updateStudentProfile(profileData: {
+  email: string;
+  firstName?: string;
+  middleName?: string;
+  lastName?: string;
+  displayName?: string;
+  degree?: string;
+  jobTitle?: string;
+  institution?: string;
+  course?: string;
+  yearLevel?: string;
+  phone?: string;
+}): Promise<{ success: boolean; error?: string }> {
+  try {
+    // 1. Update in Supabase profiles table if authenticated
+    if (checkIsConfigured()) {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const fullName = [profileData.firstName, profileData.middleName, profileData.lastName]
+          .filter(Boolean)
+          .join(' ') || profileData.displayName || user.email?.split('@')[0];
+
+        const { error: updateErr } = await supabase
+          .from('profiles')
+          .update({
+            full_name: fullName,
+            degree: profileData.degree || '',
+            job_title: profileData.jobTitle || '',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', user.id);
+
+        if (updateErr) {
+          await supabase
+            .from('profiles')
+            .update({ full_name: fullName })
+            .eq('id', user.id);
+        }
+      }
+    }
+
+    // 2. Sync to server backend
+    await fetch('/api/user/profile', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-user-email': profileData.email,
+      },
+      body: JSON.stringify(profileData),
+    });
+
+    notifyDataChanged();
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Failed to update profile' };
+  }
+}
+
+/**
+ * Change authenticated user password using Supabase Auth
+ */
+export async function changeUserPassword(newPassword: string): Promise<{ success: boolean; error?: string }> {
+  if (!checkIsConfigured()) {
+    return { success: true }; // Local demo mode
+  }
+  try {
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (error) {
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Password update failed' };
+  }
+}
+
+/**
+ * Request email address change using Supabase Auth
+ */
+export async function requestEmailChange(newEmail: string): Promise<{ success: boolean; error?: string }> {
+  if (!checkIsConfigured()) {
+    return { success: true };
+  }
+  try {
+    const { error } = await supabase.auth.updateUser({ email: newEmail.trim() });
+    if (error) {
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Email change request failed' };
+  }
+}
+
+/**
+ * Send password reset email via Supabase Auth
+ */
+export async function sendPasswordResetEmail(email: string): Promise<{ success: boolean; error?: string }> {
+  if (!checkIsConfigured()) {
+    return { success: true };
+  }
+  try {
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+      redirectTo: window.location.origin,
+    });
+    if (error) {
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Password reset request failed' };
+  }
+}
+
+/**
+ * Sign out all other sessions
+ */
+export async function signOutAllSessions(): Promise<{ success: boolean }> {
+  if (checkIsConfigured()) {
+    try {
+      await supabase.auth.signOut({ scope: 'others' });
+    } catch (e) {
+      console.warn('Sign out other sessions error:', e);
+    }
+  }
+  return { success: true };
+}
+
+/**
+ * Request user account deletion
+ */
+export async function requestAccountDeletion(email: string): Promise<{ success: boolean; error?: string }> {
+  try {
+    const res = await fetch('/api/user/delete-account', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-user-email': email,
+      },
+      body: JSON.stringify({ email }),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      return { success: false, error: data.error || 'Failed to delete account.' };
+    }
+
+    if (checkIsConfigured()) {
+      await supabase.auth.signOut();
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Network error requesting deletion.' };
+  }
+}
+
+// -------------------------------------------------------------
+// Administrator Dashboard API Client Helpers & MFA Security
+// -------------------------------------------------------------
+
+const MFA_TOKEN_STORAGE_KEY = 'studybuddy_admin_mfa_token';
+
+export function getAdminMfaToken(): string {
+  if (typeof window === 'undefined') return '';
+  return localStorage.getItem(MFA_TOKEN_STORAGE_KEY) || '';
+}
+
+export function setAdminMfaToken(token: string): void {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(MFA_TOKEN_STORAGE_KEY, token);
+  }
+}
+
+export function clearAdminMfaToken(): void {
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem(MFA_TOKEN_STORAGE_KEY);
+  }
+}
+
+/**
+ * Constructs authentication headers including Supabase JWT and MFA AAL2 token
+ */
+export async function getAdminAuthHeaders(adminEmail: string): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {
+    'x-user-email': adminEmail,
+  };
+
+  const mfaToken = getAdminMfaToken();
+  if (mfaToken) {
+    headers['x-admin-mfa-token'] = mfaToken;
+  }
+
+  try {
+    const { data } = await supabase.auth.getSession();
+    if (data?.session?.access_token) {
+      headers['Authorization'] = `Bearer ${data.session.access_token}`;
+      headers['x-supabase-access-token'] = data.session.access_token;
+    }
+  } catch {
+    // Continue with headers available
+  }
+
+  return headers;
+}
+
+export async function fetchAdminOverview(adminEmail: string): Promise<any> {
+  const headers = await getAdminAuthHeaders(adminEmail);
+  const res = await fetch('/api/admin/overview', { headers });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err: any = new Error(data.message || data.error || 'Failed to fetch administrator overview.');
+    err.requiresMfa = Boolean(data.requiresMfa);
+    err.requiresEnrollment = Boolean(data.requiresEnrollment);
+    err.code = data.error;
+    throw err;
+  }
+  return data;
+}
+
+export async function fetchAdminStudents(adminEmail: string, search?: string): Promise<any> {
+  const headers = await getAdminAuthHeaders(adminEmail);
+  const url = search ? `/api/admin/students?search=${encodeURIComponent(search)}` : '/api/admin/students';
+  const res = await fetch(url, { headers });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err: any = new Error(data.message || data.error || 'Failed to fetch students list.');
+    err.requiresMfa = Boolean(data.requiresMfa);
+    err.requiresEnrollment = Boolean(data.requiresEnrollment);
+    throw err;
+  }
+  return data;
+}
+
+export async function updateStudentStatus(
+  adminEmail: string,
+  studentId: string,
+  status: 'active' | 'suspended',
+  reason?: string
+): Promise<any> {
+  const headers = await getAdminAuthHeaders(adminEmail);
+  headers['Content-Type'] = 'application/json';
+
+  const res = await fetch(`/api/admin/students/${studentId}/status`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ status, reason }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err: any = new Error(data.message || data.error || 'Failed to update student status.');
+    err.requiresMfa = Boolean(data.requiresMfa);
+    throw err;
+  }
+  return data;
+}
+
+export async function fetchAdminsList(adminEmail: string): Promise<any> {
+  const headers = await getAdminAuthHeaders(adminEmail);
+  const res = await fetch('/api/admin/admins', { headers });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err: any = new Error(data.message || data.error || 'Failed to fetch administrators list.');
+    err.requiresMfa = Boolean(data.requiresMfa);
+    err.requiresEnrollment = Boolean(data.requiresEnrollment);
+    throw err;
+  }
+  return data;
+}
+
+export async function inviteAdministrator(
+  adminEmail: string,
+  params: { fullName: string; email: string; role: 'admin' | 'super_admin' }
+): Promise<any> {
+  const headers = await getAdminAuthHeaders(adminEmail);
+  headers['Content-Type'] = 'application/json';
+
+  const res = await fetch('/api/admin/admins/invite', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(params),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err: any = new Error(data.message || data.error || 'Failed to send administrator invitation.');
+    err.requiresMfa = Boolean(data.requiresMfa);
+    throw err;
+  }
+  return data;
+}
+
+export async function updateAdminRole(
+  superAdminEmail: string,
+  targetId: string,
+  newRole: 'admin' | 'super_admin' | 'student'
+): Promise<any> {
+  const headers = await getAdminAuthHeaders(superAdminEmail);
+  headers['Content-Type'] = 'application/json';
+
+  const res = await fetch(`/api/admin/admins/${targetId}/role`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ newRole }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err: any = new Error(data.message || data.error || 'Failed to update administrator role.');
+    err.requiresMfa = Boolean(data.requiresMfa);
+    throw err;
+  }
+  return data;
+}
+
+export async function revokeAdminPrivileges(superAdminEmail: string, targetId: string): Promise<any> {
+  const headers = await getAdminAuthHeaders(superAdminEmail);
+  headers['Content-Type'] = 'application/json';
+
+  const res = await fetch(`/api/admin/admins/${targetId}/revoke`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err: any = new Error(data.message || data.error || 'Failed to revoke administrator privileges.');
+    err.requiresMfa = Boolean(data.requiresMfa);
+    throw err;
+  }
+  return data;
+}
+
+export async function fetchAdminAuditLogs(adminEmail: string): Promise<any> {
+  const headers = await getAdminAuthHeaders(adminEmail);
+  const res = await fetch('/api/admin/audit-logs', { headers });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err: any = new Error(data.message || data.error || 'Failed to fetch audit logs.');
+    err.requiresMfa = Boolean(data.requiresMfa);
+    throw err;
+  }
+  return data;
+}
+
+export async function fetchSystemConfig(superAdminEmail: string): Promise<any> {
+  const headers = await getAdminAuthHeaders(superAdminEmail);
+  const res = await fetch('/api/admin/system-config', { headers });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err: any = new Error(data.message || data.error || 'Failed to fetch system configuration.');
+    err.requiresMfa = Boolean(data.requiresMfa);
+    err.requiresEnrollment = Boolean(data.requiresEnrollment);
+    throw err;
+  }
+  return data;
+}
+
+export async function updateSystemConfig(superAdminEmail: string, config: any): Promise<any> {
+  const headers = await getAdminAuthHeaders(superAdminEmail);
+  headers['Content-Type'] = 'application/json';
+
+  const res = await fetch('/api/admin/system-config', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(config),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err: any = new Error(data.message || data.error || 'Failed to update system configuration.');
+    err.requiresMfa = Boolean(data.requiresMfa);
+    throw err;
+  }
+  return data;
+}
+
+// -------------------------------------------------------------
+// MFA TOTP Client API Helpers (Supabase Auth & Backend Sync)
+// -------------------------------------------------------------
+
+/**
+ * Fetch current MFA factors and assurance level for user
+ */
+export async function fetchMfaStatus(email: string): Promise<{
+  isEnrolled: boolean;
+  status: string;
+  friendlyName: string;
+  factorId: string | null;
+  verifiedAt: string | null;
+  currentAal: 'none' | 'aal1' | 'aal2';
+  nextLevel: 'aal1' | 'aal2';
+}> {
+  const headers = await getAdminAuthHeaders(email);
+
+  // 1. Check backend status
+  let backendData: any = null;
+  try {
+    const res = await fetch('/api/admin/mfa/status', { headers });
+    if (res.ok) {
+      backendData = await res.json();
+    }
+  } catch {
+    // Ignore backend fetch error
+  }
+
+  // 2. Check Supabase client factors if configured and logged in
+  if (checkIsConfigured()) {
+    try {
+      const { data: factorData } = await supabase.auth.mfa.listFactors();
+      const verifiedTotp = factorData?.totp?.find((f) => f.status === 'verified');
+      const { data: aalData } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+
+      if (verifiedTotp) {
+        return {
+          isEnrolled: true,
+          status: 'verified',
+          friendlyName: verifiedTotp.friendly_name || 'Google Authenticator / Microsoft Authenticator (TOTP)',
+          factorId: verifiedTotp.id,
+          verifiedAt: verifiedTotp.created_at,
+          currentAal: aalData?.currentLevel === 'aal2' ? 'aal2' : 'aal1',
+          nextLevel: aalData?.nextLevel === 'aal1' ? 'aal1' : 'aal2',
+        };
+      }
+    } catch {
+      // Continue to fallback on backendData
+    }
+  }
+
+  if (backendData) {
+    return backendData;
+  }
+
+  return {
+    isEnrolled: false,
+    status: 'none',
+    friendlyName: 'Google Authenticator / Microsoft Authenticator (TOTP)',
+    factorId: null,
+    verifiedAt: null,
+    currentAal: 'none',
+    nextLevel: 'aal1',
+  };
+}
+
+/**
+ * Initiate TOTP Authenticator Enrollment.
+ * Generates Base32 Secret, URI, and SVG QR Code.
+ */
+export async function enrollMfaTotp(params: {
+  email: string;
+  friendlyName?: string;
+}): Promise<{
+  id: string;
+  factorType: 'totp';
+  totp: {
+    qrCode: string;
+    secret: string;
+    uri: string;
+  };
+}> {
+  // If Supabase Auth session is active, enroll via Supabase
+  if (checkIsConfigured()) {
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (sessionData?.session) {
+        const { data, error } = await supabase.auth.mfa.enroll({
+          factorType: 'totp',
+          friendlyName: params.friendlyName || 'StudyBuddy Authenticator',
+          issuer: 'Study Buddy AI',
+        });
+        if (!error && data?.totp) {
+          return {
+            id: data.id,
+            factorType: 'totp',
+            totp: {
+              qrCode: data.totp.qr_code,
+              secret: data.totp.secret,
+              uri: data.totp.uri,
+            },
+          };
+        }
+      }
+    } catch {
+      // Fallback to server enroll
+    }
+  }
+
+  // Call server enrollment endpoint
+  const headers = await getAdminAuthHeaders(params.email);
+  headers['Content-Type'] = 'application/json';
+
+  const res = await fetch('/api/admin/mfa/enroll', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ friendlyName: params.friendlyName }),
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || 'Failed to initiate MFA enrollment.');
+  }
+
+  return data;
+}
+
+/**
+ * Verifies 6-digit TOTP code and upgrades session to AAL2.
+ */
+export async function verifyMfaTotp(params: {
+  email: string;
+  code: string;
+  factorId?: string;
+}): Promise<{
+  success: boolean;
+  message: string;
+  aal: 'aal2';
+  sessionToken?: string;
+}> {
+  let supabaseVerified = false;
+
+  // If Supabase Auth is active and factorId is provided, challenge and verify in Supabase
+  if (checkIsConfigured() && params.factorId) {
+    try {
+      const { data: chData, error: chErr } = await supabase.auth.mfa.challenge({
+        factorId: params.factorId,
+      });
+      if (!chErr && chData?.id) {
+        const { error: verErr } = await supabase.auth.mfa.verify({
+          factorId: params.factorId,
+          challengeId: chData.id,
+          code: params.code.trim(),
+        });
+        if (!verErr) {
+          supabaseVerified = true;
+        }
+      }
+    } catch {
+      // Fallback to backend verification
+    }
+  }
+
+  // Sync with backend to establish AAL2 session token and audit log
+  const headers = await getAdminAuthHeaders(params.email);
+  headers['Content-Type'] = 'application/json';
+
+  const res = await fetch('/api/admin/mfa/verify', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      code: params.code.trim(),
+      factorId: params.factorId,
+    }),
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || 'Invalid 6-digit verification code.');
+  }
+
+  if (data.sessionToken) {
+    setAdminMfaToken(data.sessionToken);
+  }
+
+  notifyDataChanged();
+
+  return {
+    success: true,
+    message: data.message || 'MFA Enabled and Verified. Assurance level upgraded to AAL2.',
+    aal: 'aal2',
+    sessionToken: data.sessionToken,
+  };
+}
+
+/**
+ * Disables or removes an MFA factor.
+ */
+export async function unenrollMfaTotp(params: {
+  email: string;
+  factorId?: string;
+  code?: string;
+}): Promise<{ success: boolean; message: string }> {
+  // If Supabase has an active factor, unenroll
+  if (checkIsConfigured() && params.factorId) {
+    try {
+      await supabase.auth.mfa.unenroll({ factorId: params.factorId });
+    } catch {
+      // Continue to backend unenroll
+    }
+  }
+
+  const headers = await getAdminAuthHeaders(params.email);
+  headers['Content-Type'] = 'application/json';
+
+  const res = await fetch('/api/admin/mfa/unenroll', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ code: params.code }),
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || 'Failed to disable MFA authenticator.');
+  }
+
+  clearAdminMfaToken();
+  notifyDataChanged();
+
+  return {
+    success: true,
+    message: data.message || 'MFA Authenticator has been disabled.',
+  };
 }
 

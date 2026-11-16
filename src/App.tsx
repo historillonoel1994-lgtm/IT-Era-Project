@@ -29,6 +29,9 @@ import {
   isLoggedIn,
   setLoggedIn,
   saveUserProfile,
+  loadAndReconstructLesson,
+  isPlaceholderContent,
+  resetUserScopedLocalData,
 } from './services/storage';
 import {
   supabase,
@@ -47,10 +50,13 @@ import { FocusTimerView } from './components/FocusTimerView';
 import { MyProgressView } from './components/MyProgressView';
 import { UploadLessonModal } from './components/UploadLessonModal';
 import { AuthModal } from './components/AuthModal';
+import { MyAccountModal } from './components/MyAccountModal';
+import { AdminDashboardModal } from './components/AdminDashboardModal';
 import { ResponsibleAiBanner } from './components/ResponsibleAiBanner';
 import { GuestShowcaseHero } from './components/GuestShowcaseHero';
 import { SupabaseDepositedVault } from './components/SupabaseDepositedVault';
-import { DEFAULT_USER } from './data/mockUserData';
+import { DEFAULT_USER, INITIAL_SUPER_ADMIN_USER } from './data/mockUserData';
+import { verifyUserRoleWithServer } from './lib/supabase';
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<NavTab>('summarize');
@@ -63,7 +69,10 @@ export default function App() {
   // Modals
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
-  const [authInitialMode, setAuthInitialMode] = useState<'login' | 'signup'>('login');
+  const [authInitialMode, setAuthInitialMode] = useState<'login' | 'signup' | 'admin_login'>('login');
+  const [isAdminDashboardOpen, setIsAdminDashboardOpen] = useState(false);
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
+  const [accountModalSection, setAccountModalSection] = useState<'personal' | 'security' | 'learning'>('personal');
 
   useEffect(() => {
     // Refresh lessons and active lesson on mount
@@ -73,39 +82,68 @@ export default function App() {
 
     // If Supabase is configured, check session and sync user records
     if (checkIsConfigured()) {
+      const syncAuthenticatedSession = async (sessionUser: any) => {
+        resetUserScopedLocalData(sessionUser.id);
+        setIsUserLoggedIn(true);
+        setLoggedIn(true);
+        let populatedProfile = await ensureUserProfileAndProgress(sessionUser);
+        if (sessionUser.email) {
+          try {
+            const roleRes = await verifyUserRoleWithServer({
+              email: sessionUser.email,
+              userId: sessionUser.id,
+              fullName: populatedProfile?.fullName,
+            });
+            if (roleRes?.role && populatedProfile) {
+              populatedProfile = { ...populatedProfile, role: roleRes.role };
+            }
+          } catch (e) {
+            console.warn('Role verification notice:', e);
+          }
+        }
+        if (populatedProfile) {
+          setUser(populatedProfile);
+          saveUserProfile(populatedProfile);
+        }
+        await syncUserDataFromSupabase(sessionUser.id);
+        const syncedLessons = getStoredLessons();
+        setLessons(syncedLessons);
+        const currentActive = getActiveLesson();
+        setActiveLesson(currentActive);
+        setProgress(getStudentProgress());
+        setUser(getUserProfile());
+
+        if (isPlaceholderContent(currentActive.pages) || currentActive.processingStatus !== 'ready') {
+          loadAndReconstructLesson(currentActive.id)
+            .then((full) => {
+              setActiveLesson(full);
+              setLessons(getStoredLessons());
+            })
+            .catch(() => {});
+        }
+      };
+
       supabase.auth.getSession().then(async ({ data: { session } }) => {
         if (session?.user) {
-          setIsUserLoggedIn(true);
-          setLoggedIn(true);
-          const populatedProfile = await ensureUserProfileAndProgress(session.user);
-          if (populatedProfile) {
-            setUser(populatedProfile);
-            saveUserProfile(populatedProfile);
-          }
-          await syncUserDataFromSupabase(session.user.id);
-          setLessons(getStoredLessons());
-          setActiveLesson(getActiveLesson());
-          setProgress(getStudentProgress());
-          setUser(getUserProfile());
+          await syncAuthenticatedSession(session.user);
         }
       });
 
-      const { data: authListener } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (session?.user) {
-          setIsUserLoggedIn(true);
-          setLoggedIn(true);
-          const populatedProfile = await ensureUserProfileAndProgress(session.user);
-          if (populatedProfile) {
-            setUser(populatedProfile);
-            saveUserProfile(populatedProfile);
-          }
-          await syncUserDataFromSupabase(session.user.id);
-          setLessons(getStoredLessons());
-          setActiveLesson(getActiveLesson());
-          setProgress(getStudentProgress());
-          setUser(getUserProfile());
+          await syncAuthenticatedSession(session.user);
         } else {
-          setIsUserLoggedIn(isLoggedIn());
+          if (event === 'SIGNED_OUT') {
+            resetUserScopedLocalData();
+            setLoggedIn(false);
+            setIsUserLoggedIn(false);
+            setUser(DEFAULT_USER);
+            setLessons(getStoredLessons());
+            setActiveLesson(getActiveLesson());
+            setProgress(getStudentProgress());
+          } else {
+            setIsUserLoggedIn(isLoggedIn());
+          }
         }
       });
 
@@ -127,9 +165,35 @@ export default function App() {
     };
   }, []);
 
-  const handleSelectLesson = (lesson: LessonDocument) => {
+  // Ensure active lesson has full extracted content on initial load
+  useEffect(() => {
+    const current = getActiveLesson();
+    if (isPlaceholderContent(current.pages) || current.processingStatus !== 'ready') {
+      loadAndReconstructLesson(current.id)
+        .then((full) => {
+          setActiveLesson(full);
+          setLessons(getStoredLessons());
+        })
+        .catch(() => {});
+    }
+  }, []);
+
+  const handleSelectLesson = async (lesson: LessonDocument) => {
     setActiveLesson(lesson);
     setActiveLessonId(lesson.id);
+
+    // Retrieve and reconstruct complete document content from backend/database/storage
+    // Ensures selecting an existing saved document provides the same level of understanding
+    // as selecting it immediately after its original upload
+    if (isPlaceholderContent(lesson.pages) || lesson.processingStatus !== 'ready') {
+      try {
+        const fullDoc = await loadAndReconstructLesson(lesson.id);
+        setActiveLesson(fullDoc);
+        setLessons(getStoredLessons());
+      } catch (err) {
+        console.warn('Lesson reconstruction note:', err);
+      }
+    }
   };
 
   const handleLessonUploaded = (newLesson: LessonDocument) => {
@@ -165,14 +229,26 @@ export default function App() {
       id: 'usr-working-maria',
       fullName: 'Maria Santos',
       email: 'maria.santos@univ.edu',
+      role: 'student',
       degree: 'BS Information Technology (3rd Year)',
       jobTitle: 'BPO Customer Support (Night Shift, 30 hrs/wk)',
       institution: 'City State College',
       avatarSeed: 'maria-studybuddy',
+      accountStatus: 'active',
     };
     saveUserProfile(maria);
     setLoggedIn(true);
     setUser(maria);
+    setIsUserLoggedIn(true);
+    setLessons(getStoredLessons());
+    setActiveLesson(getActiveLesson());
+    setProgress(getStudentProgress());
+  };
+
+  const handleQuickDemoNoel = () => {
+    saveUserProfile(INITIAL_SUPER_ADMIN_USER);
+    setLoggedIn(true);
+    setUser(INITIAL_SUPER_ADMIN_USER);
     setIsUserLoggedIn(true);
     setLessons(getStoredLessons());
     setActiveLesson(getActiveLesson());
@@ -195,6 +271,11 @@ export default function App() {
           setIsAuthOpen(true);
         }}
         isLoggedIn={isUserLoggedIn}
+        onOpenAdminDashboard={() => setIsAdminDashboardOpen(true)}
+        onOpenAccountModal={() => {
+          setAccountModalSection('personal');
+          setIsAccountModalOpen(true);
+        }}
       />
 
       {/* Main Container */}
@@ -213,12 +294,17 @@ export default function App() {
               setAuthInitialMode('signup');
               setIsAuthOpen(true);
             }}
+            onOpenAdminLogin={() => {
+              setAuthInitialMode('admin_login');
+              setIsAuthOpen(true);
+            }}
             onBrowseDemo={() => {
               const el = document.getElementById('feature-tabs-section');
               el?.scrollIntoView({ behavior: 'smooth' });
             }}
             onQuickDemoJuan={handleQuickDemoJuan}
             onQuickDemoMaria={handleQuickDemoMaria}
+            onQuickDemoNoel={handleQuickDemoNoel}
           />
         ) : (
           <div className="space-y-6">
@@ -512,6 +598,27 @@ export default function App() {
         currentUser={user}
         onUserChange={handleUserChange}
         initialMode={authInitialMode}
+        onOpenAdminDashboard={() => setIsAdminDashboardOpen(true)}
+      />
+
+      {/* Personal Account Settings & Profile Modal */}
+      <MyAccountModal
+        isOpen={isAccountModalOpen}
+        onClose={() => setIsAccountModalOpen(false)}
+        currentUser={user}
+        onUserChange={handleUserChange}
+        onNavigateToProgress={() => {
+          setIsAccountModalOpen(false);
+          setCurrentTab('progress');
+        }}
+        initialSection={accountModalSection}
+      />
+
+      {/* Administrator Security & Control Center Dashboard */}
+      <AdminDashboardModal
+        isOpen={isAdminDashboardOpen}
+        onClose={() => setIsAdminDashboardOpen(false)}
+        currentUser={user}
       />
     </div>
   );
