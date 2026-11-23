@@ -22,7 +22,7 @@ import {
 import { LessonDocument } from '../types';
 import { DEFAULT_LESSONS } from '../data/defaultLessons';
 import { parseDocumentFile } from '../services/api';
-import { addLesson } from '../services/storage';
+import { addLesson, isDemoModeActive } from '../services/storage';
 import {
   supabase,
   checkIsConfigured,
@@ -187,8 +187,8 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
       fileName: file?.name,
     };
 
-    // When a file is uploaded with Supabase configured & authenticated, persist to cloud vault too
-    if (file && checkIsConfigured()) {
+    // When a file is uploaded with Supabase configured & authenticated (and NOT in Demo Mode), persist to cloud vault too
+    if (file && checkIsConfigured() && !isDemoModeActive()) {
       setLoading(true);
       setError(null);
       setIsSavedConfirmed(false);
@@ -321,6 +321,16 @@ export const UploadLessonModal: React.FC<UploadLessonModalProps> = ({
             <X className="w-5 h-5" />
           </button>
         </div>
+
+        {/* Demo Mode Notice */}
+        {isDemoModeActive() && (
+          <div className="px-6 py-2.5 bg-amber-50 border-b border-amber-200 text-xs text-amber-900 flex items-center space-x-2">
+            <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>
+              <strong>Demo Mode:</strong> Choose a built-in sample lesson below or preview a file temporarily in memory. Create an account to save files permanently.
+            </span>
+          </div>
+        )}
 
         {/* Tab switch */}
         <div className="px-6 pt-3 pb-1 border-b border-slate-100 flex space-x-4 bg-slate-50/50 text-xs font-semibold">

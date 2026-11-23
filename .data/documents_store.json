@@ -1853,5 +1853,113 @@
     "fullTextLength": 4981,
     "uploadedAt": "2026-11-15T06:24:38.534Z",
     "updatedAt": "2026-11-15T06:29:40.893Z"
+  },
+  "doc-1795408456786": {
+    "id": "doc-1795408456786",
+    "title": "bio_sample.txt",
+    "filename": "bio_sample.txt",
+    "fileType": "txt",
+    "totalPages": 1,
+    "pages": [
+      {
+        "pageNumber": 1,
+        "text": "Photosynthesis converts light energy into chemical energy in green plants. Chlorophyll absorbs sunlight in chloroplasts."
+      }
+    ],
+    "chunks": [
+      {
+        "chunkId": "chunk-1",
+        "pageNumber": 1,
+        "text": "Photosynthesis converts light energy into chemical energy in green plants. Chlorophyll absorbs sunlight in chloroplasts.",
+        "keywords": [
+          "energy",
+          "photosynthesis",
+          "converts",
+          "light",
+          "chemical",
+          "green",
+          "plants",
+          "chlorophyll"
+        ],
+        "charCount": 120
+      }
+    ],
+    "processingStatus": "ready",
+    "statusMessage": "Document extracted and ready for study.",
+    "fullTextLength": 120,
+    "uploadedAt": "2026-11-23T04:34:16.789Z",
+    "updatedAt": "2026-11-23T04:34:16.789Z"
+  },
+  "file:bio_sample.txt": {
+    "id": "doc-1795408476627",
+    "title": "bio_sample.txt",
+    "filename": "bio_sample.txt",
+    "fileType": "txt",
+    "totalPages": 1,
+    "pages": [
+      {
+        "pageNumber": 1,
+        "text": "Photosynthesis converts light energy into chemical energy in green plants. Chlorophyll absorbs sunlight in chloroplasts."
+      }
+    ],
+    "chunks": [
+      {
+        "chunkId": "chunk-1",
+        "pageNumber": 1,
+        "text": "Photosynthesis converts light energy into chemical energy in green plants. Chlorophyll absorbs sunlight in chloroplasts.",
+        "keywords": [
+          "energy",
+          "photosynthesis",
+          "converts",
+          "light",
+          "chemical",
+          "green",
+          "plants",
+          "chlorophyll"
+        ],
+        "charCount": 120
+      }
+    ],
+    "processingStatus": "ready",
+    "statusMessage": "Document extracted and ready for study.",
+    "fullTextLength": 120,
+    "uploadedAt": "2026-11-23T04:34:36.629Z",
+    "updatedAt": "2026-11-23T04:34:36.629Z"
+  },
+  "doc-1795408476627": {
+    "id": "doc-1795408476627",
+    "title": "bio_sample.txt",
+    "filename": "bio_sample.txt",
+    "fileType": "txt",
+    "totalPages": 1,
+    "pages": [
+      {
+        "pageNumber": 1,
+        "text": "Photosynthesis converts light energy into chemical energy in green plants. Chlorophyll absorbs sunlight in chloroplasts."
+      }
+    ],
+    "chunks": [
+      {
+        "chunkId": "chunk-1",
+        "pageNumber": 1,
+        "text": "Photosynthesis converts light energy into chemical energy in green plants. Chlorophyll absorbs sunlight in chloroplasts.",
+        "keywords": [
+          "energy",
+          "photosynthesis",
+          "converts",
+          "light",
+          "chemical",
+          "green",
+          "plants",
+          "chlorophyll"
+        ],
+        "charCount": 120
+      }
+    ],
+    "processingStatus": "ready",
+    "statusMessage": "Document extracted and ready for study.",
+    "fullTextLength": 120,
+    "uploadedAt": "2026-11-23T04:34:36.629Z",
+    "updatedAt": "2026-11-23T04:34:36.629Z"
   }
 }

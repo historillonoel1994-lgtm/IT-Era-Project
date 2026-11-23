@@ -158,6 +158,128 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: '50mb' }));
+
+// =============================================================
+// SECURITY: PER-IP SLIDING-WINDOW RATE LIMITING & DEMO GUARD
+// =============================================================
+interface RateLimitBucket {
+  timestamps: number[];
+}
+
+const rateLimitBuckets = new Map<string, RateLimitBucket>();
+
+function checkSlidingRateLimit(
+  bucketKey: string,
+  maxRequests: number,
+  windowMs: number
+): { allowed: boolean; retryAfterSec: number; remaining: number } {
+  const now = Date.now();
+  const cutoff = now - windowMs;
+  const bucket = rateLimitBuckets.get(bucketKey) || { timestamps: [] };
+  bucket.timestamps = bucket.timestamps.filter((ts) => ts > cutoff);
+
+  if (bucket.timestamps.length >= maxRequests) {
+    const oldest = bucket.timestamps[0] || now;
+    const retryAfterSec = Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
+    rateLimitBuckets.set(bucketKey, bucket);
+    return { allowed: false, retryAfterSec, remaining: 0 };
+  }
+
+  bucket.timestamps.push(now);
+  rateLimitBuckets.set(bucketKey, bucket);
+
+  // Periodically prune stale map entries to avoid unbounded memory growth
+  if (rateLimitBuckets.size > 5000) {
+    for (const [key, b] of rateLimitBuckets.entries()) {
+      if (b.timestamps.length === 0 || b.timestamps[b.timestamps.length - 1] < now - 15 * 60 * 1000) {
+        rateLimitBuckets.delete(key);
+      }
+    }
+  }
+
+  return {
+    allowed: true,
+    retryAfterSec: 0,
+    remaining: Math.max(0, maxRequests - bucket.timestamps.length),
+  };
+}
+
+const AI_RATE_LIMITED_PATHS = new Set([
+  '/api/summarize',
+  '/api/quiz',
+  '/api/ask-tutor',
+  '/api/ask-general',
+  '/api/suggest-schedule',
+  '/api/parse-document',
+  '/api/explain-term',
+  '/api/analyze-chapters',
+  '/api/reviewer-generate',
+  '/api/generate-flashcards',
+  '/api/generate-contrasts',
+]);
+
+app.use((req: Request, res: Response, next: express.NextFunction) => {
+  const reqPath = req.path;
+  if (!reqPath.startsWith('/api/')) return next();
+
+  const clientIp =
+    (typeof req.headers['x-forwarded-for'] === 'string'
+      ? req.headers['x-forwarded-for'].split(',')[0].trim()
+      : req.socket.remoteAddress) || '127.0.0.1';
+
+  const isDemoRequest = req.headers['x-demo-mode'] === 'true';
+  const hasBearer =
+    typeof req.headers['authorization'] === 'string' &&
+    req.headers['authorization'].startsWith('Bearer ') &&
+    req.headers['authorization'].length > 25;
+
+  // Block Demo Mode from mutating server-persisted document store, user accounts, or admin routes
+  if (
+    isDemoRequest &&
+    (reqPath.startsWith('/api/admin/') ||
+      reqPath.startsWith('/api/user/') ||
+      reqPath === '/api/documents/store' ||
+      reqPath.endsWith('/reprocess'))
+  ) {
+    return res.status(403).json({
+      error: 'Demo Mode is read-only. Create a student account to save personal files or manage account settings.',
+    });
+  }
+
+  // Rate limit Auth & Admin routes against brute-force / probing
+  if (reqPath.startsWith('/api/auth/') || reqPath.startsWith('/api/admin/')) {
+    const limit = hasBearer ? 120 : 25;
+    const windowMs = hasBearer ? 60 * 1000 : 15 * 60 * 1000;
+    const key = `auth-admin:${hasBearer ? 'auth' : 'anon'}:${clientIp}`;
+    const result = checkSlidingRateLimit(key, limit, windowMs);
+    if (!result.allowed) {
+      res.setHeader('Retry-After', String(result.retryAfterSec));
+      return res.status(429).json({
+        error: 'Too many authentication or administrative requests. Please wait before trying again.',
+        retryAfterSeconds: result.retryAfterSec,
+      });
+    }
+  }
+
+  // Rate limit AI routes (tighter quota for Demo Mode / unauthenticated visitors)
+  if (AI_RATE_LIMITED_PATHS.has(reqPath)) {
+    const isDemoOrAnon = isDemoRequest || !hasBearer;
+    const maxPerMin = isDemoOrAnon ? 12 : 60;
+    const key = `ai:${isDemoOrAnon ? 'demo' : 'user'}:${clientIp}`;
+    const result = checkSlidingRateLimit(key, maxPerMin, 60 * 1000);
+    if (!result.allowed) {
+      res.setHeader('Retry-After', String(result.retryAfterSec));
+      return res.status(429).json({
+        error: isDemoOrAnon
+          ? 'Demo Mode AI usage limit reached. Please wait a moment or create a free student account for higher study limits.'
+          : 'AI request rate limit exceeded. Please wait a moment and try again.',
+        retryAfterSeconds: result.retryAfterSec,
+      });
+    }
+  }
+
+  next();
+});
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Return clean JSON error if request payload exceeds Express 50MB limit
@@ -2804,6 +2926,21 @@ function loadAdminStore(): AdminStoreData {
       const parsed = JSON.parse(raw);
       if (!parsed.mfaFactors) parsed.mfaFactors = {};
       if (!parsed.mfaSessions) parsed.mfaSessions = {};
+      if (!parsed.systemConfig) {
+        parsed.systemConfig = {
+          allowedModels: [...CANDIDATE_MODELS],
+          defaultDifficulty: 'medium',
+          maxQuestionCount: 100,
+          rateLimitRpm: 60,
+          cloudSettingsRestricted: true,
+          developerAccessRoleRequired: 'super_admin',
+        };
+      } else {
+        const validModels = (parsed.systemConfig.allowedModels || []).filter((m: string) =>
+          CANDIDATE_MODELS.includes(m)
+        );
+        parsed.systemConfig.allowedModels = validModels.length > 0 ? validModels : [...CANDIDATE_MODELS];
+      }
 
       // Ensure initial super admin exists
       if (!parsed.users[INITIAL_SUPER_ADMIN_EMAIL.toLowerCase()]) {
@@ -2938,23 +3075,119 @@ function getClientIp(req: Request): string {
   return req.socket.remoteAddress || '127.0.0.1';
 }
 
-function extractRequesterEmail(req: Request): string | null {
-  const headerEmail = req.headers['x-user-email'] || req.headers['x-admin-email'];
-  if (headerEmail && typeof headerEmail === 'string' && headerEmail.trim()) {
-    return headerEmail.trim().toLowerCase();
-  }
+// Verified Supabase JWT cache (short 60s TTL to reduce auth roundtrips while keeping verification strict)
+const verifiedJwtCache = new Map<string, { email: string; userId: string; aal?: string; expiresAt: number }>();
+
+function extractBearerToken(req: Request): string | null {
   const authHeader = req.headers['authorization'];
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const payload = parseJwtPayload(authHeader.slice(7));
-    if (payload?.email && typeof payload.email === 'string') {
-      return payload.email.trim().toLowerCase();
-    }
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    const t = authHeader.slice(7).trim();
+    if (t.length > 20) return t;
   }
-  const bodyEmail = req.body?.adminEmail || req.body?.email || req.body?.requesterEmail;
-  if (bodyEmail && typeof bodyEmail === 'string' && bodyEmail.trim()) {
-    return bodyEmail.trim().toLowerCase();
+  const altHeader = req.headers['x-supabase-access-token'];
+  if (typeof altHeader === 'string' && altHeader.trim().length > 20) {
+    return altHeader.trim();
   }
   return null;
+}
+
+async function verifySupabaseAccessToken(
+  token: string
+): Promise<{ valid: boolean; email?: string; userId?: string; aal?: string }> {
+  if (!token || token.length < 20) return { valid: false };
+
+  const payload = parseJwtPayload(token);
+  if (!payload || typeof payload !== 'object') return { valid: false };
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (payload.exp && Number(payload.exp) <= nowSec) {
+    return { valid: false };
+  }
+
+  const cached = verifiedJwtCache.get(token);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { valid: true, email: cached.email, userId: cached.userId, aal: cached.aal };
+  }
+
+  const supabaseUrl = (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '').trim();
+  const supabaseKey = (
+    process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    ''
+  ).trim();
+
+  // When Supabase env is configured on the server, cryptographically verify the JWT with Supabase Auth
+  if (supabaseUrl && supabaseKey) {
+    try {
+      const resp = await fetch(`${supabaseUrl.replace(/\/+$/, '')}/auth/v1/user`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          apikey: supabaseKey,
+        },
+      });
+      if (!resp.ok) {
+        return { valid: false };
+      }
+      const userData: any = await resp.json();
+      const verifiedEmail = typeof userData?.email === 'string' ? userData.email.trim().toLowerCase() : '';
+      const verifiedId = typeof userData?.id === 'string' ? userData.id : '';
+      if (!verifiedEmail || !verifiedId) {
+        return { valid: false };
+      }
+      const aal = typeof payload.aal === 'string' ? payload.aal : undefined;
+      verifiedJwtCache.set(token, {
+        email: verifiedEmail,
+        userId: verifiedId,
+        aal,
+        expiresAt: Math.min(Date.now() + 60_000, (Number(payload.exp) || nowSec + 60) * 1000),
+      });
+      return { valid: true, email: verifiedEmail, userId: verifiedId, aal };
+    } catch (err) {
+      console.error('Supabase JWT verification network error:', err);
+      return { valid: false };
+    }
+  }
+
+  // Fallback when server process env does not expose Supabase URL/key:
+  // Strictly require a structurally valid, non-expired Supabase Auth JWT carrying sub + email + role='authenticated'
+  const email = typeof payload.email === 'string' ? payload.email.trim().toLowerCase() : '';
+  const userId = typeof payload.sub === 'string' ? payload.sub.trim() : '';
+  const aud = payload.aud;
+  if (!email || !userId || (aud && aud !== 'authenticated')) {
+    return { valid: false };
+  }
+  return {
+    valid: true,
+    email,
+    userId,
+    aal: typeof payload.aal === 'string' ? payload.aal : undefined,
+  };
+}
+
+async function resolveVerifiedRequester(
+  req: Request
+): Promise<{ email: string; userId?: string; aal?: string } | null> {
+  const token = extractBearerToken(req);
+  if (!token) return null;
+
+  const verified = await verifySupabaseAccessToken(token);
+  if (!verified.valid || !verified.email) return null;
+
+  // If x-user-email header is also sent, ensure it does not conflict with the verified JWT email
+  const headerEmail = req.headers['x-user-email'] || req.headers['x-admin-email'];
+  if (typeof headerEmail === 'string' && headerEmail.trim()) {
+    if (headerEmail.trim().toLowerCase() !== verified.email) {
+      return null;
+    }
+  }
+
+  return {
+    email: verified.email,
+    userId: verified.userId,
+    aal: verified.aal,
+  };
 }
 
 function resolveUserRole(email?: string): {
@@ -3175,104 +3408,120 @@ function verifyAdminMfaAssurance(req: Request, adminEmail: string): {
 // ENDPOINTS
 // -------------------------------------------------------------
 
-// 1. One-time Initial Super Administrator Bootstrap Status & Trigger
+// Health Check Endpoint for Admin & Runtime Diagnostics
+app.get('/api/health', (_req: Request, res: Response) => {
+  res.json({
+    ok: true,
+    service: 'study-buddy-ai',
+    primaryModel: PRIMARY_MODEL,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// 1. Initial Super Administrator Bootstrap Status (Sanitized — never exposes admin email or name publicly)
 app.get('/api/admin/bootstrap-status', (_req: Request, res: Response) => {
   const superAdminCount = Object.values(adminStore.users).filter(
     (u) => u.role === 'super_admin' && u.accountStatus === 'active'
   ).length;
 
   res.json({
-    bootstrapped: adminStore.bootstrapped,
-    initialAdminEmail: adminStore.initialAdminEmail,
-    initialAdminName: INITIAL_SUPER_ADMIN_NAME,
+    bootstrapped: Boolean(adminStore.bootstrapped && superAdminCount > 0),
     superAdminCount,
   });
 });
 
+// Locked once initial Super Administrator exists — blocks unauthenticated re-initialization
 app.post('/api/admin/bootstrap-initial', (req: Request, res: Response) => {
-  const { email, fullName, secretKey } = req.body;
   const ip = getClientIp(req);
-
-  // If already bootstrapped with active super admin, prevent re-execution
   const superAdminCount = Object.values(adminStore.users).filter(
     (u) => u.role === 'super_admin' && u.accountStatus === 'active'
   ).length;
 
-  const targetEmail = (email && typeof email === 'string' ? email.trim() : INITIAL_SUPER_ADMIN_EMAIL).toLowerCase();
-  const targetName = fullName && typeof fullName === 'string' ? fullName.trim() : INITIAL_SUPER_ADMIN_NAME;
-
-  if (adminStore.bootstrapped && superAdminCount > 0 && targetEmail !== INITIAL_SUPER_ADMIN_EMAIL.toLowerCase()) {
-    return res.status(400).json({
-      error: 'Initial Super Administrator bootstrap has already been completed. Re-initialization is disabled.',
-      initialAdminEmail: adminStore.initialAdminEmail,
+  if (adminStore.bootstrapped && superAdminCount > 0) {
+    addAuditLog({
+      adminUserId: 'anonymous',
+      adminEmail: 'unauthenticated',
+      action: 'BLOCKED_BOOTSTRAP_REPLAY_ATTEMPT',
+      details: { path: req.path, method: req.method },
+      ipAddress: ip,
+    });
+    return res.status(403).json({
+      error: 'Initial Super Administrator bootstrap is locked and cannot be re-executed.',
     });
   }
 
-  const superAdminUser: StoredRoleUser = {
-    id: `admin-super-${Date.now()}`,
-    email: targetEmail,
-    fullName: targetName,
-    role: 'super_admin',
-    assignedAt: new Date().toISOString(),
-    assignedBy: 'initial_bootstrap',
-    accountStatus: 'active',
-    institution: 'State Metropolitan University',
-  };
-
-  adminStore.users[targetEmail] = superAdminUser;
-  adminStore.bootstrapped = true;
-  adminStore.initialAdminEmail = targetEmail;
-
-  addAuditLog({
-    adminUserId: superAdminUser.id,
-    adminEmail: targetEmail,
-    action: 'INITIAL_BOOTSTRAP',
-    targetUserId: superAdminUser.id,
-    targetUserEmail: targetEmail,
-    details: {
-      message: `Initial Super Administrator ${targetName} (${targetEmail}) activated.`,
-    },
-    ipAddress: ip,
-  });
-
-  saveAdminStore(adminStore);
-
-  return res.json({
-    success: true,
-    message: `Initial Super Administrator ${targetName} (${targetEmail}) is active with full administrative authority.`,
-    user: superAdminUser,
+  return res.status(403).json({
+    error: 'Public administrator bootstrap is disabled. Provision administrators via Supabase backend configuration.',
   });
 });
 
 // 2. Server-Side Role Verification Endpoint (Called after Supabase Auth)
-app.post('/api/auth/verify-role', (req: Request, res: Response) => {
-  const { email, userId, fullName, degree, jobTitle, institution } = req.body;
-  if (!email || typeof email !== 'string') {
+app.post('/api/auth/verify-role', async (req: Request, res: Response) => {
+  const { email, userId, fullName, degree, institution } = req.body;
+  const ip = getClientIp(req);
+
+  const verifiedRequester = await resolveVerifiedRequester(req);
+  const cleanEmail = verifiedRequester?.email || (typeof email === 'string' ? email.trim().toLowerCase() : '');
+
+  if (!cleanEmail) {
     return res.status(400).json({ error: 'Valid email is required for role verification.' });
   }
 
-  const cleanEmail = email.trim().toLowerCase();
-  const ip = getClientIp(req);
+  // SECURITY: Never grant admin/super_admin roles without a verified authentication token
+  if (!verifiedRequester) {
+    const existingUnverified = adminStore.users[cleanEmail];
+    if (existingUnverified && (existingUnverified.role === 'admin' || existingUnverified.role === 'super_admin')) {
+      addAuditLog({
+        adminUserId: 'unauthenticated',
+        adminEmail: cleanEmail,
+        action: 'UNVERIFIED_ADMIN_ROLE_PROBE_BLOCKED',
+        details: { note: 'Attempted admin role verification without a valid authentication token.' },
+        ipAddress: ip,
+      });
+      return res.status(401).json({
+        error: 'Authentication token required to verify administrative privileges.',
+        role: 'student',
+        isAdmin: false,
+        isSuperAdmin: false,
+      });
+    }
+
+    return res.json({
+      success: true,
+      email: cleanEmail,
+      role: 'student',
+      accountStatus: existingUnverified?.accountStatus || 'active',
+      isSuperAdmin: false,
+      isAdmin: false,
+      permissions: {
+        canAccessAdminDashboard: false,
+        canManageStudents: false,
+        canManageAdmins: false,
+        canAccessCloudSettings: false,
+        canViewAuditLogs: false,
+      },
+    });
+  }
+
   const { role, user } = resolveUserRole(cleanEmail);
 
-  // Update or insert user record
+  // Update or insert user record (role is ALWAYS determined server-side, never from client body)
   if (user) {
     user.lastLogin = new Date().toISOString();
-    if (fullName) user.fullName = fullName;
-    if (institution) user.institution = institution;
+    if (fullName && typeof fullName === 'string') user.fullName = fullName.trim();
+    if (institution && typeof institution === 'string') user.institution = institution.trim();
     saveAdminStore(adminStore);
   } else {
-    // Register new student account in server store
     const newStudent: StoredRoleUser = {
-      id: userId || `usr-${Date.now()}`,
+      id: verifiedRequester.userId || userId || `usr-${Date.now()}`,
       email: cleanEmail,
-      fullName: fullName || cleanEmail.split('@')[0],
+      fullName: (typeof fullName === 'string' && fullName.trim()) || cleanEmail.split('@')[0],
       role: 'student',
       assignedAt: new Date().toISOString(),
       assignedBy: 'public_registration',
       accountStatus: 'active',
-      institution: institution || 'State Metropolitan University',
-      course: degree || 'College Student',
+      institution: (typeof institution === 'string' && institution.trim()) || 'State Metropolitan University',
+      course: (typeof degree === 'string' && degree.trim()) || 'College Student',
       lastLogin: new Date().toISOString(),
     };
     adminStore.users[cleanEmail] = newStudent;
@@ -3281,7 +3530,7 @@ app.post('/api/auth/verify-role', (req: Request, res: Response) => {
 
   const accountStatus = adminStore.users[cleanEmail]?.accountStatus || 'active';
 
-  // If student account is suspended, notify frontend
+  // If account is suspended, notify frontend
   if (accountStatus === 'suspended') {
     addAuditLog({
       adminUserId: 'system',
@@ -3315,18 +3564,26 @@ app.post('/api/auth/verify-role', (req: Request, res: Response) => {
   });
 });
 
-// Middleware: Require Administrator or Super Administrator
-function requireAdminRole(req: Request, res: Response, next: express.NextFunction) {
-  const email = extractRequesterEmail(req);
-  if (!email) {
-    return res.status(401).json({ error: 'Unauthorized: Authentication required.' });
-  }
-
-  const { role, user } = resolveUserRole(email);
-  if (role !== 'admin' && role !== 'super_admin') {
-    const ip = getClientIp(req);
+// Middleware: Require Authenticated Administrator or Super Administrator (Verified Bearer JWT + RBAC + MFA)
+async function requireAdminRole(req: Request, res: Response, next: express.NextFunction) {
+  const ip = getClientIp(req);
+  const verified = await resolveVerifiedRequester(req);
+  if (!verified) {
     addAuditLog({
       adminUserId: 'anonymous',
+      adminEmail: String(req.headers['x-user-email'] || 'unauthenticated'),
+      action: 'UNAUTHENTICATED_ADMIN_API_BLOCKED',
+      details: { path: req.path, method: req.method },
+      ipAddress: ip,
+    });
+    return res.status(401).json({ error: 'Unauthorized: Valid authenticated session required.' });
+  }
+
+  const email = verified.email;
+  const { role, user } = resolveUserRole(email);
+  if (role !== 'admin' && role !== 'super_admin') {
+    addAuditLog({
+      adminUserId: verified.userId || 'student',
       adminEmail: email,
       action: 'UNAUTHORIZED_ADMIN_ACCESS_ATTEMPT',
       details: { path: req.path, method: req.method },
@@ -3346,7 +3603,6 @@ function requireAdminRole(req: Request, res: Response, next: express.NextFunctio
   // Strict Backend MFA Assurance Check: Require Supabase AAL2 / TOTP verification
   const mfaCheck = verifyAdminMfaAssurance(req, email);
   if (!mfaCheck.allowed) {
-    const ip = getClientIp(req);
     addAuditLog({
       adminUserId: user?.id || 'unknown',
       adminEmail: email,
@@ -3374,18 +3630,26 @@ function requireAdminRole(req: Request, res: Response, next: express.NextFunctio
   next();
 }
 
-// Middleware: Require Super Administrator
-function requireSuperAdminRole(req: Request, res: Response, next: express.NextFunction) {
-  const email = extractRequesterEmail(req);
-  if (!email) {
-    return res.status(401).json({ error: 'Unauthorized: Authentication required.' });
+// Middleware: Require Authenticated Super Administrator (Verified Bearer JWT + RBAC + MFA)
+async function requireSuperAdminRole(req: Request, res: Response, next: express.NextFunction) {
+  const ip = getClientIp(req);
+  const verified = await resolveVerifiedRequester(req);
+  if (!verified) {
+    addAuditLog({
+      adminUserId: 'anonymous',
+      adminEmail: String(req.headers['x-user-email'] || 'unauthenticated'),
+      action: 'UNAUTHENTICATED_SUPER_ADMIN_API_BLOCKED',
+      details: { path: req.path, method: req.method },
+      ipAddress: ip,
+    });
+    return res.status(401).json({ error: 'Unauthorized: Valid authenticated session required.' });
   }
 
+  const email = verified.email;
   const { role, user } = resolveUserRole(email);
   if (role !== 'super_admin') {
-    const ip = getClientIp(req);
     addAuditLog({
-      adminUserId: user?.id || 'anonymous',
+      adminUserId: user?.id || verified.userId || 'anonymous',
       adminEmail: email,
       action: 'UNAUTHORIZED_SUPER_ADMIN_ATTEMPT',
       details: { path: req.path, method: req.method },
@@ -3405,7 +3669,6 @@ function requireSuperAdminRole(req: Request, res: Response, next: express.NextFu
   // Strict Backend MFA Assurance Check: Require Supabase AAL2 / TOTP verification
   const mfaCheck = verifyAdminMfaAssurance(req, email);
   if (!mfaCheck.allowed) {
-    const ip = getClientIp(req);
     addAuditLog({
       adminUserId: user?.id || 'unknown',
       adminEmail: email,
@@ -3438,13 +3701,13 @@ function requireSuperAdminRole(req: Request, res: Response, next: express.NextFu
 // -------------------------------------------------------------
 
 // Inspect current MFA Factor & Assurance Status
-app.get('/api/admin/mfa/status', (req: Request, res: Response) => {
-  const email = extractRequesterEmail(req);
-  if (!email) {
-    return res.status(401).json({ error: 'Authentication required to inspect MFA status.' });
+app.get('/api/admin/mfa/status', async (req: Request, res: Response) => {
+  const verified = await resolveVerifiedRequester(req);
+  if (!verified) {
+    return res.status(401).json({ error: 'Authenticated session required to inspect MFA status.' });
   }
 
-  const cleanEmail = email.toLowerCase().trim();
+  const cleanEmail = verified.email;
   const factor = adminStore.mfaFactors?.[cleanEmail];
   const isEnrolledAndVerified = Boolean(factor && factor.status === 'verified');
   const mfaCheck = verifyAdminMfaAssurance(req, cleanEmail);
@@ -3463,12 +3726,12 @@ app.get('/api/admin/mfa/status', (req: Request, res: Response) => {
 
 // Initiate TOTP Authenticator Enrollment (Generates Base32 Secret, URI, and SVG QR Code)
 app.post('/api/admin/mfa/enroll', async (req: Request, res: Response) => {
-  const email = extractRequesterEmail(req);
-  if (!email) {
-    return res.status(401).json({ error: 'Authentication required to enroll in MFA.' });
+  const verified = await resolveVerifiedRequester(req);
+  if (!verified) {
+    return res.status(401).json({ error: 'Authenticated session required to enroll in MFA.' });
   }
 
-  const cleanEmail = email.toLowerCase().trim();
+  const cleanEmail = verified.email;
   const friendlyName = req.body?.friendlyName || 'StudyBuddy Authenticator';
   const issuer = 'Study Buddy AI';
 
@@ -3518,18 +3781,18 @@ app.post('/api/admin/mfa/enroll', async (req: Request, res: Response) => {
 });
 
 // Verify 6-digit TOTP Code and Upgrade to Assurance Level AAL2
-app.post('/api/admin/mfa/verify', (req: Request, res: Response) => {
-  const email = extractRequesterEmail(req);
-  const { code, factorId } = req.body;
+app.post('/api/admin/mfa/verify', async (req: Request, res: Response) => {
+  const verified = await resolveVerifiedRequester(req);
+  const { code } = req.body;
 
-  if (!email) {
-    return res.status(401).json({ error: 'Authentication required for MFA verification.' });
+  if (!verified) {
+    return res.status(401).json({ error: 'Authenticated session required for MFA verification.' });
   }
   if (!code || typeof code !== 'string') {
     return res.status(400).json({ error: 'Six-digit verification code is required.' });
   }
 
-  const cleanEmail = email.toLowerCase().trim();
+  const cleanEmail = verified.email;
   const cleanCode = code.trim().replace(/\s+/g, '');
   const ip = getClientIp(req);
   const factor = adminStore.mfaFactors?.[cleanEmail];
@@ -3597,15 +3860,15 @@ app.post('/api/admin/mfa/verify', (req: Request, res: Response) => {
 });
 
 // Disable / Unenroll Authenticator (Option for managing or replacing existing authenticator)
-app.post('/api/admin/mfa/unenroll', (req: Request, res: Response) => {
-  const email = extractRequesterEmail(req);
+app.post('/api/admin/mfa/unenroll', async (req: Request, res: Response) => {
+  const verified = await resolveVerifiedRequester(req);
   const { code } = req.body;
 
-  if (!email) {
-    return res.status(401).json({ error: 'Authentication required to manage MFA.' });
+  if (!verified) {
+    return res.status(401).json({ error: 'Authenticated session required to manage MFA.' });
   }
 
-  const cleanEmail = email.toLowerCase().trim();
+  const cleanEmail = verified.email;
   const ip = getClientIp(req);
   const factor = adminStore.mfaFactors?.[cleanEmail];
 
@@ -3993,16 +4256,16 @@ app.post('/api/admin/system-config', requireSuperAdminRole, (req: Request, res: 
   });
 });
 
-// 8. User Account Deletion Request
-app.post('/api/user/delete-account', (req: Request, res: Response) => {
-  const { email, passwordConfirmation } = req.body;
+// 8. User Account Deletion Request (Requires Verified Authenticated Session matching target account)
+app.post('/api/user/delete-account', async (req: Request, res: Response) => {
   const ip = getClientIp(req);
+  const verified = await resolveVerifiedRequester(req);
 
-  if (!email || typeof email !== 'string') {
-    return res.status(400).json({ error: 'Email is required to request account deletion.' });
+  if (!verified) {
+    return res.status(401).json({ error: 'Authentication required to delete an account.' });
   }
 
-  const cleanEmail = email.trim().toLowerCase();
+  const cleanEmail = verified.email;
   const target = adminStore.users[cleanEmail];
 
   // CRITICAL SAFEGUARD: Prevent deletion of the last active Super Administrator
@@ -4023,7 +4286,7 @@ app.post('/api/user/delete-account', (req: Request, res: Response) => {
   }
 
   addAuditLog({
-    adminUserId: target?.id || 'user',
+    adminUserId: target?.id || verified.userId || 'user',
     adminEmail: cleanEmail,
     action: 'USER_ACCOUNT_DELETED',
     targetUserEmail: cleanEmail,
@@ -4037,24 +4300,25 @@ app.post('/api/user/delete-account', (req: Request, res: Response) => {
   });
 });
 
-// 9. User Profile Update Endpoint
-app.post('/api/user/profile', (req: Request, res: Response) => {
-  const { email, firstName, middleName, lastName, displayName, institution, course, yearLevel, phone } = req.body;
-  if (!email) {
-    return res.status(400).json({ error: 'Email is required' });
+// 9. User Profile Update Endpoint (Requires Verified Authenticated Session — never allows role self-escalation)
+app.post('/api/user/profile', async (req: Request, res: Response) => {
+  const verified = await resolveVerifiedRequester(req);
+  if (!verified) {
+    return res.status(401).json({ error: 'Authentication required to update your profile.' });
   }
 
-  const cleanEmail = email.trim().toLowerCase();
+  const { firstName, middleName, lastName, displayName, institution, course, yearLevel, phone } = req.body;
+  const cleanEmail = verified.email;
   let user = adminStore.users[cleanEmail];
 
   const fullName = [firstName, middleName, lastName].filter(Boolean).join(' ') || displayName || cleanEmail.split('@')[0];
 
   if (!user) {
     user = {
-      id: `usr-${Date.now()}`,
+      id: verified.userId || `usr-${Date.now()}`,
       email: cleanEmail,
       fullName,
-      role: cleanEmail === INITIAL_SUPER_ADMIN_EMAIL.toLowerCase() ? 'super_admin' : 'student',
+      role: 'student',
       assignedAt: new Date().toISOString(),
       assignedBy: 'profile_sync',
       accountStatus: 'active',

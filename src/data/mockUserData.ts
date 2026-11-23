@@ -1,40 +1,25 @@
 import { UserProfile, WorkScheduleItem, ClassScheduleItem, SchoolTaskItem, TodayPlanItem, StudentProgress } from '../types';
 
-export const DEFAULT_USER: UserProfile = {
-  id: 'usr-working-student-01',
-  fullName: 'Juan Dela Cruz',
-  firstName: 'Juan',
+export const DEMO_VISITOR_PROFILE: UserProfile = {
+  id: 'demo-visitor-session',
+  fullName: 'Demo Student',
+  firstName: 'Demo',
   middleName: '',
-  lastName: 'Dela Cruz',
-  displayName: 'Juan Dela Cruz',
-  email: 'juan.delacruz@student.univ.edu',
+  lastName: 'Student',
+  displayName: 'Demo Visitor (Sample Data)',
+  email: 'demo@studybuddy.sample',
   role: 'student',
-  degree: 'BS Business Administration (Major in Marketing)',
-  jobTitle: 'Retail Sales Associate (Part-Time, 24 hrs/wk)',
-  institution: 'State Metropolitan University',
+  degree: 'BS Business Administration (Sample)',
+  jobTitle: 'Part-Time Retail Associate (Sample)',
+  institution: 'Sample State University',
   course: 'BS Business Administration',
   yearLevel: '3rd Year',
-  avatarSeed: 'juan-studybuddy',
+  avatarSeed: 'demo-visitor',
   accountStatus: 'active',
 };
 
-export const INITIAL_SUPER_ADMIN_USER: UserProfile = {
-  id: 'admin-super-noel-01',
-  fullName: 'Noel Historillo',
-  firstName: 'Noel',
-  middleName: '',
-  lastName: 'Historillo',
-  displayName: 'Noel Historillo (Super Admin)',
-  email: 'historillo.noel1994@gmail.com',
-  role: 'super_admin',
-  degree: 'Master of Science in Information Technology',
-  jobTitle: 'System Architect & Chief Administrator',
-  institution: 'State Metropolitan University',
-  course: 'MS Information Technology',
-  yearLevel: 'Graduate Faculty / Admin',
-  avatarSeed: 'noel-superadmin',
-  accountStatus: 'active',
-};
+export const DEFAULT_USER: UserProfile = DEMO_VISITOR_PROFILE;
+
 
 export const DEFAULT_WORK_SCHEDULE: WorkScheduleItem[] = [
   {

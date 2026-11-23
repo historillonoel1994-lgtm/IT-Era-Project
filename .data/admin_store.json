@@ -11,7 +11,7 @@
       "assignedBy": "initial_bootstrap",
       "accountStatus": "active",
       "institution": "NBS College",
-      "lastLogin": "2026-09-30T14:10:53.630Z",
+      "lastLogin": "2026-11-16T09:21:38.422Z",
       "course": "BS Entrepreneurship"
     },
     "juan.delacruz@student.univ.edu": {
@@ -47,11 +47,67 @@
       "accountStatus": "active",
       "institution": "State Metropolitan University",
       "course": "BS Entrepreneurship",
-      "lastLogin": "2026-09-30T13:46:42.902Z"
+      "lastLogin": "2026-11-23T04:28:03.466Z"
     }
   },
   "invitations": [],
   "auditLogs": [
+    {
+      "id": "log-1794820053211-7d2f0f",
+      "adminUserId": "admin-super-1790776012857",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "ADMIN_ACCESS_BLOCKED_MFA_REQUIRED",
+      "details": {
+        "path": "/api/admin/audit-logs",
+        "method": "GET",
+        "currentAal": "none",
+        "requiresEnrollment": true
+      },
+      "ipAddress": "127.0.0.1",
+      "createdAt": "2026-11-16T09:07:33.211Z"
+    },
+    {
+      "id": "log-1794820053207-42ec4c",
+      "adminUserId": "admin-super-1790776012857",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "ADMIN_ACCESS_BLOCKED_MFA_REQUIRED",
+      "details": {
+        "path": "/api/admin/admins",
+        "method": "GET",
+        "currentAal": "none",
+        "requiresEnrollment": true
+      },
+      "ipAddress": "127.0.0.1",
+      "createdAt": "2026-11-16T09:07:33.207Z"
+    },
+    {
+      "id": "log-1794820053201-8b0fca",
+      "adminUserId": "admin-super-1790776012857",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "ADMIN_ACCESS_BLOCKED_MFA_REQUIRED",
+      "details": {
+        "path": "/api/admin/students",
+        "method": "GET",
+        "currentAal": "none",
+        "requiresEnrollment": true
+      },
+      "ipAddress": "127.0.0.1",
+      "createdAt": "2026-11-16T09:07:33.201Z"
+    },
+    {
+      "id": "log-1794820053187-751a26",
+      "adminUserId": "admin-super-1790776012857",
+      "adminEmail": "historillo.noel1994@gmail.com",
+      "action": "ADMIN_ACCESS_BLOCKED_MFA_REQUIRED",
+      "details": {
+        "path": "/api/admin/overview",
+        "method": "GET",
+        "currentAal": "none",
+        "requiresEnrollment": true
+      },
+      "ipAddress": "127.0.0.1",
+      "createdAt": "2026-11-16T09:07:33.187Z"
+    },
     {
       "id": "log-1790777578833-a5ba7a",
       "adminUserId": "admin-super-1790776012857",
@@ -297,8 +353,6 @@
   ],
   "systemConfig": {
     "allowedModels": [
-      "gemini-3.8-flash",
-      "gemini-flash-latest",
       "gemini-3.1-flash-lite"
     ],
     "defaultDifficulty": "medium",

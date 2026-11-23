@@ -44,6 +44,7 @@ import {
   enrollMfaTotp,
   verifyMfaTotp,
   unenrollMfaTotp,
+  clearAdminMfaToken,
 } from '../lib/supabase';
 import {
   saveUserProfile,
@@ -51,8 +52,10 @@ import {
   getStudentProgress,
   getStoredLessons,
   getQuizResults,
+  resetUserScopedLocalData,
 } from '../services/storage';
 import { DEFAULT_USER } from '../data/mockUserData';
+import { StudyBuddyLogo } from './StudyBuddyLogo';
 
 interface MyAccountModalProps {
   isOpen: boolean;
@@ -376,6 +379,8 @@ export const MyAccountModal: React.FC<MyAccountModalProps> = ({
     if (checkIsConfigured()) {
       await signOutStudent();
     }
+    clearAdminMfaToken();
+    resetUserScopedLocalData();
     setLoggedIn(false);
     saveUserProfile(DEFAULT_USER);
     onUserChange(DEFAULT_USER);
@@ -405,6 +410,8 @@ export const MyAccountModal: React.FC<MyAccountModalProps> = ({
     setLoading(false);
 
     if (res.success) {
+      clearAdminMfaToken();
+      resetUserScopedLocalData();
       setLoggedIn(false);
       saveUserProfile(DEFAULT_USER);
       onUserChange(DEFAULT_USER);
@@ -420,9 +427,7 @@ export const MyAccountModal: React.FC<MyAccountModalProps> = ({
         {/* Top Header */}
         <div className="px-6 py-4 bg-gradient-to-r from-slate-900 via-sky-950 to-indigo-950 text-white flex items-center justify-between">
           <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-2xl bg-sky-600 text-white font-black text-base flex items-center justify-center shadow-md">
-              {currentUser.fullName[0]}
-            </div>
+            <StudyBuddyLogo size="sm" />
             <div>
               <div className="flex items-center space-x-2">
                 <h3 className="font-extrabold text-base text-white tracking-tight">

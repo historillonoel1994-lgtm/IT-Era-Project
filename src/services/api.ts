@@ -1,4 +1,46 @@
-import { LessonDocument, LessonSummary, QuizQuestion, StudentProgress, DocumentChunk } from '../types';
+import {
+  LessonDocument,
+  LessonSummary,
+  QuizQuestion,
+  StudentProgress,
+  DocumentChunk,
+  DocumentChapter,
+  ReviewerQuestion,
+  ReviewerDifficulty,
+  FlashcardItem,
+  ConceptContrastItem,
+} from '../types';
+import { checkIsConfigured, supabase } from '../lib/supabase';
+
+// Lightweight read-only getter synced by App.tsx to avoid circular imports with storage.ts
+let apiDemoModeFlag = false;
+export function setApiDemoMode(active: boolean): void {
+  apiDemoModeFlag = active;
+}
+
+async function buildApiHeaders(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (apiDemoModeFlag) {
+    headers['x-demo-mode'] = 'true';
+    return headers;
+  }
+
+  if (checkIsConfigured()) {
+    try {
+      const { data } = await supabase.auth.getSession();
+      if (data?.session?.access_token) {
+        headers['Authorization'] = `Bearer ${data.session.access_token}`;
+      }
+    } catch {
+      // Proceed without auth header
+    }
+  }
+
+  return headers;
+}
 
 export interface SummarizeParams {
   pages: { pageNumber: number | string; text: string }[];
@@ -39,7 +81,7 @@ export interface StudyPlanParams {
 export async function summarizeLesson(params: SummarizeParams): Promise<LessonSummary> {
   const response = await fetch('/api/summarize', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await buildApiHeaders(),
     body: JSON.stringify(params),
   });
 
@@ -58,7 +100,7 @@ export async function summarizeLesson(params: SummarizeParams): Promise<LessonSu
 export async function generateQuiz(params: QuizParams): Promise<QuizQuestion[]> {
   const response = await fetch('/api/quiz', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await buildApiHeaders(),
     body: JSON.stringify(params),
   });
 
@@ -93,7 +135,7 @@ export interface AskTutorResult {
 export async function askStudyBuddy(params: AskTutorParams): Promise<AskTutorResult> {
   const response = await fetch('/api/ask-tutor', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await buildApiHeaders(),
     body: JSON.stringify(params),
   });
 
@@ -118,7 +160,7 @@ export interface AskGeneralParams {
 export async function askGemini(question: string): Promise<string> {
   const response = await fetch('/api/ask-general', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await buildApiHeaders(),
     body: JSON.stringify({ question }),
   });
 
@@ -152,7 +194,7 @@ export async function askGeneralGemini(
 
   const response = await fetch('/api/ask-general', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await buildApiHeaders(),
     body: JSON.stringify(payload),
   });
 
@@ -171,7 +213,7 @@ export async function suggestStudySchedule(params: StudyPlanParams): Promise<{
 }> {
   const response = await fetch('/api/suggest-schedule', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await buildApiHeaders(),
     body: JSON.stringify(params),
   });
 
@@ -201,7 +243,7 @@ export async function parseDocumentFile(
 ): Promise<ParsedDocumentResult> {
   const response = await fetch('/api/parse-document', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await buildApiHeaders(),
     body: JSON.stringify({
       fileBase64: base64,
       filename,
@@ -239,7 +281,7 @@ export async function storeDocumentContent(docData: {
 }): Promise<{ success: boolean; document: any }> {
   const response = await fetch('/api/documents/store', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await buildApiHeaders(),
     body: JSON.stringify(docData),
   });
 
@@ -267,7 +309,7 @@ export async function reprocessDocument(
 ): Promise<{ success: boolean; document: any; message?: string }> {
   const response = await fetch(`/api/documents/${encodeURIComponent(id)}/reprocess`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await buildApiHeaders(),
     body: JSON.stringify(params || {}),
   });
 
@@ -282,14 +324,6 @@ export async function reprocessDocument(
 // ==========================================
 // SELF-REVIEWER & EXPLANATION API CLIENTS
 // ==========================================
-
-import {
-  DocumentChapter,
-  ReviewerQuestion,
-  ReviewerDifficulty,
-  FlashcardItem,
-  ConceptContrastItem,
-} from '../types';
 
 export interface ExplainTermResult {
   success: boolean;
@@ -309,7 +343,7 @@ export async function explainUnfamiliarTerm(params: {
 }): Promise<ExplainTermResult> {
   const response = await fetch('/api/explain-term', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await buildApiHeaders(),
     body: JSON.stringify(params),
   });
 
@@ -330,7 +364,7 @@ export async function analyzeDocumentChapters(params: {
 }): Promise<DocumentChapter[]> {
   const response = await fetch('/api/analyze-chapters', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await buildApiHeaders(),
     body: JSON.stringify(params),
   });
 
@@ -370,7 +404,7 @@ export interface ReviewerGenerateResult {
 export async function generateSelfReviewer(params: ReviewerGenerateParams): Promise<ReviewerGenerateResult> {
   const response = await fetch('/api/reviewer-generate', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await buildApiHeaders(),
     body: JSON.stringify(params),
   });
 
@@ -392,7 +426,7 @@ export async function generateFlashcards(params: {
 }): Promise<FlashcardItem[]> {
   const response = await fetch('/api/generate-flashcards', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await buildApiHeaders(),
     body: JSON.stringify(params),
   });
 
@@ -414,7 +448,7 @@ export async function generateConceptContrasts(params: {
 }): Promise<ConceptContrastItem[]> {
   const response = await fetch('/api/generate-contrasts', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await buildApiHeaders(),
     body: JSON.stringify(params),
   });
 

@@ -58,10 +58,89 @@ const KEYS = {
   MEMORIZATION_PROGRESS: 'studybuddy_memorization_progress',
   DOCUMENTS_CONTENT: 'studybuddy_documents_content',
   LAST_USER_ID: 'studybuddy_last_auth_user_id',
+  TUTORIAL_PROGRESS: 'studybuddy_tutorial_completed_by_user',
 };
 
-// Safe JSON parser
+// ==========================================
+// ISOLATED DEMO MODE SANDBOX (IN-MEMORY ONLY)
+// ==========================================
+let demoModeActive = false;
+let demoMemoryStore: Record<string, any> = {};
+
+function createFreshDemoMemoryStore(): Record<string, any> {
+  return {
+    [KEYS.USER]: { ...DEFAULT_USER },
+    [KEYS.LESSONS]: JSON.parse(JSON.stringify(DEFAULT_LESSONS)),
+    [KEYS.ACTIVE_LESSON_ID]: DEFAULT_LESSONS[0]?.id || '',
+    [KEYS.SUMMARIES]: {},
+    [KEYS.QUIZ_RESULTS]: JSON.parse(JSON.stringify(SAMPLE_EXAM_TAKES)),
+    [KEYS.WORK_SCHEDULE]: JSON.parse(JSON.stringify(DEFAULT_WORK_SCHEDULE)),
+    [KEYS.CLASS_SCHEDULE]: JSON.parse(JSON.stringify(DEFAULT_CLASS_SCHEDULE)),
+    [KEYS.SCHOOL_TASKS]: JSON.parse(JSON.stringify(DEFAULT_SCHOOL_TASKS)),
+    [KEYS.TODAY_PLAN]: JSON.parse(JSON.stringify(DEFAULT_TODAY_PLAN)),
+    [KEYS.PROGRESS]: JSON.parse(JSON.stringify(DEFAULT_PROGRESS)),
+    [KEYS.AUDIO_SESSIONS]: {},
+    [KEYS.REVIEWER_ATTEMPTS]: [],
+    [KEYS.FLASHCARD_PROGRESS]: {},
+    [KEYS.MEMORIZATION_PROGRESS]: {},
+    [KEYS.DOCUMENTS_CONTENT]: {},
+  };
+}
+
+export function isDemoModeActive(): boolean {
+  return demoModeActive;
+}
+
+export function setDemoModeActive(active: boolean): void {
+  demoModeActive = active;
+  if (active) {
+    demoMemoryStore = createFreshDemoMemoryStore();
+  } else {
+    demoMemoryStore = {};
+  }
+}
+
+export function resetDemoSessionData(): void {
+  demoMemoryStore = createFreshDemoMemoryStore();
+}
+
+// Tutorial progress (persisted ONLY for registered authenticated user IDs — never persisted in Demo Mode)
+export function getTutorialCompleted(userId?: string): boolean {
+  if (!userId || demoModeActive || userId === 'demo-visitor-session') {
+    return false;
+  }
+  try {
+    const raw = localStorage.getItem(KEYS.TUTORIAL_PROGRESS);
+    if (!raw) return false;
+    const map = JSON.parse(raw) as Record<string, boolean>;
+    return Boolean(map[userId]);
+  } catch {
+    return false;
+  }
+}
+
+export function setTutorialCompleted(userId: string | undefined, completed: boolean): void {
+  if (!userId || demoModeActive || userId === 'demo-visitor-session') {
+    return;
+  }
+  try {
+    const raw = localStorage.getItem(KEYS.TUTORIAL_PROGRESS);
+    const map: Record<string, boolean> = raw ? JSON.parse(raw) : {};
+    map[userId] = completed;
+    localStorage.setItem(KEYS.TUTORIAL_PROGRESS, JSON.stringify(map));
+  } catch {
+    // Ignore storage write error
+  }
+}
+
+// Safe JSON parser (automatically routes to isolated in-memory store when Demo Mode is active)
 function safeGet<T>(key: string, fallback: T): T {
+  if (demoModeActive && key !== KEYS.AUTH_LOGGED_IN && key !== KEYS.TUTORIAL_PROGRESS) {
+    if (key in demoMemoryStore) {
+      return demoMemoryStore[key] as T;
+    }
+    return fallback;
+  }
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return fallback;
@@ -73,6 +152,10 @@ function safeGet<T>(key: string, fallback: T): T {
 }
 
 function safeSet<T>(key: string, value: T): void {
+  if (demoModeActive && key !== KEYS.AUTH_LOGGED_IN && key !== KEYS.TUTORIAL_PROGRESS) {
+    demoMemoryStore[key] = value;
+    return;
+  }
   try {
     localStorage.setItem(key, JSON.stringify(value));
   } catch (e) {
@@ -233,7 +316,8 @@ export function saveDocumentFullContent(
 
   safeSet(KEYS.DOCUMENTS_CONTENT, cleanDocs);
 
-  if (!syncToServer) return Promise.resolve(true);
+  // Never sync demo documents to persistent backend store
+  if (!syncToServer || demoModeActive) return Promise.resolve(true);
 
   return storeDocumentContent({
     id,
@@ -706,10 +790,10 @@ export function updateProgress(partial: Partial<StudentProgress>): StudentProgre
   const updated = { ...current, ...partial };
   safeSet(KEYS.PROGRESS, updated);
 
-  // Sync to Supabase study_progress table
-  if (checkIsConfigured()) {
+  // Sync to Supabase study_progress table (strictly skipped in Demo Mode)
+  if (!demoModeActive && checkIsConfigured()) {
     const user = getUserProfile();
-    if (user && user.id) {
+    if (user && user.id && user.id !== 'demo-visitor-session') {
       syncStudyProgressToSupabase(user.id, updated).catch((err) =>
         console.warn('Background Supabase progress sync error:', err)
       );

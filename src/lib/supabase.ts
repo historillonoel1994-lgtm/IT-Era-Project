@@ -288,7 +288,7 @@ export async function ensureUserProfileAndProgress(
     id: user.id,
     fullName,
     email: user.email || '',
-    role: (user.email?.toLowerCase() === 'historillo.noel1994@gmail.com' ? 'super_admin' : 'student'),
+    role: 'student',
     degree,
     jobTitle,
     avatarSeed,
@@ -364,7 +364,7 @@ export async function ensureUserProfileAndProgress(
           id: insertedProfile.id || user.id,
           fullName: insertedProfile.full_name || fullName,
           email: insertedProfile.email || user.email || '',
-          role: (user.email?.toLowerCase() === 'historillo.noel1994@gmail.com' ? 'super_admin' : 'student'),
+          role: 'student',
           degree: insertedProfile.degree || degree,
           jobTitle: insertedProfile.job_title || jobTitle,
           avatarSeed: insertedProfile.avatar_seed || avatarSeed,
@@ -376,7 +376,7 @@ export async function ensureUserProfileAndProgress(
         id: existingProfile.id,
         fullName: existingProfile.full_name || fullName,
         email: existingProfile.email || user.email || '',
-        role: (user.email?.toLowerCase() === 'historillo.noel1994@gmail.com' ? 'super_admin' : 'student'),
+        role: 'student',
         degree: existingProfile.degree || degree,
         jobTitle: existingProfile.job_title || jobTitle,
         avatarSeed: existingProfile.avatar_seed || avatarSeed,
@@ -1269,12 +1269,26 @@ export async function verifyUserRoleWithServer(params: {
   error?: string;
 }> {
   try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-user-email': params.email,
+    };
+
+    if (checkIsConfigured()) {
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (sessionData?.session?.access_token) {
+          headers['Authorization'] = `Bearer ${sessionData.session.access_token}`;
+          headers['x-supabase-access-token'] = sessionData.session.access_token;
+        }
+      } catch {
+        // Proceed without token
+      }
+    }
+
     const res = await fetch('/api/auth/verify-role', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-user-email': params.email,
-      },
+      headers,
       body: JSON.stringify(params),
     });
 
@@ -1309,46 +1323,23 @@ export async function verifyUserRoleWithServer(params: {
 }
 
 /**
- * Trigger the protected one-time initial Super Administrator setup
- */
-export async function triggerInitialSuperAdminBootstrap(params?: {
-  email?: string;
-  fullName?: string;
-}): Promise<{ success: boolean; message: string; user?: any }> {
-  try {
-    const res = await fetch('/api/admin/bootstrap-initial', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params || {}),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      return { success: false, message: data.error || 'Bootstrap failed.' };
-    }
-    return { success: true, message: data.message, user: data.user };
-  } catch (err: any) {
-    return { success: false, message: err.message || 'Network error triggering bootstrap.' };
-  }
-}
-
-/**
- * Check Initial Super Administrator status
+ * Check Initial Super Administrator status (sanitized — never exposes admin email or name)
  */
 export async function fetchBootstrapStatus(): Promise<{
   bootstrapped: boolean;
-  initialAdminEmail: string;
-  initialAdminName: string;
   superAdminCount: number;
 }> {
   try {
     const res = await fetch('/api/admin/bootstrap-status');
     if (!res.ok) throw new Error('Status failed');
-    return await res.json();
+    const data = await res.json();
+    return {
+      bootstrapped: Boolean(data.bootstrapped),
+      superAdminCount: Number(data.superAdminCount || 0),
+    };
   } catch {
     return {
       bootstrapped: true,
-      initialAdminEmail: 'historillo.noel1994@gmail.com',
-      initialAdminName: 'Noel Historillo',
       superAdminCount: 1,
     };
   }
@@ -1371,8 +1362,19 @@ export async function updateStudentProfile(profileData: {
   phone?: string;
 }): Promise<{ success: boolean; error?: string }> {
   try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-user-email': profileData.email,
+    };
+
     // 1. Update in Supabase profiles table if authenticated
     if (checkIsConfigured()) {
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (sessionData?.session?.access_token) {
+        headers['Authorization'] = `Bearer ${sessionData.session.access_token}`;
+        headers['x-supabase-access-token'] = sessionData.session.access_token;
+      }
+
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
         const fullName = [profileData.firstName, profileData.middleName, profileData.lastName]
@@ -1399,14 +1401,16 @@ export async function updateStudentProfile(profileData: {
     }
 
     // 2. Sync to server backend
-    await fetch('/api/user/profile', {
+    const resp = await fetch('/api/user/profile', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-user-email': profileData.email,
-      },
+      headers,
       body: JSON.stringify(profileData),
     });
+
+    if (!resp.ok && resp.status === 401 && checkIsConfigured()) {
+      const errData = await resp.json().catch(() => ({}));
+      return { success: false, error: errData.error || 'Authentication required to update profile.' };
+    }
 
     notifyDataChanged();
     return { success: true };
@@ -1490,12 +1494,26 @@ export async function signOutAllSessions(): Promise<{ success: boolean }> {
  */
 export async function requestAccountDeletion(email: string): Promise<{ success: boolean; error?: string }> {
   try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-user-email': email,
+    };
+
+    if (checkIsConfigured()) {
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (sessionData?.session?.access_token) {
+          headers['Authorization'] = `Bearer ${sessionData.session.access_token}`;
+          headers['x-supabase-access-token'] = sessionData.session.access_token;
+        }
+      } catch {
+        // Proceed without token
+      }
+    }
+
     const res = await fetch('/api/user/delete-account', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-user-email': email,
-      },
+      headers,
       body: JSON.stringify({ email }),
     });
 
@@ -1562,32 +1580,103 @@ export async function getAdminAuthHeaders(adminEmail: string): Promise<Record<st
   return headers;
 }
 
-export async function fetchAdminOverview(adminEmail: string): Promise<any> {
-  const headers = await getAdminAuthHeaders(adminEmail);
-  const res = await fetch('/api/admin/overview', { headers });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err: any = new Error(data.message || data.error || 'Failed to fetch administrator overview.');
-    err.requiresMfa = Boolean(data.requiresMfa);
-    err.requiresEnrollment = Boolean(data.requiresEnrollment);
-    err.code = data.error;
+async function safeAdminFetch(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (networkErr: any) {
+    const err: any = new Error(
+      `Cannot connect to the Study Buddy backend server (${networkErr?.message || 'network error'}). Please ensure the Express server is running and accessible.`
+    );
+    err.isBackendUnavailable = true;
     throw err;
   }
+}
+
+async function parseAdminApiResponse(res: Response, fallbackMessage: string): Promise<any> {
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  let data: any = null;
+  let rawText = '';
+
+  if (contentType.includes('application/json')) {
+    data = await res.json().catch(() => null);
+  } else {
+    rawText = await res.text().catch(() => '');
+    try {
+      data = rawText ? JSON.parse(rawText) : null;
+    } catch {
+      data = null;
+    }
+  }
+
+  if (!res.ok) {
+    let errMessage = data?.message || data?.error;
+    let isBackendUnavailable = false;
+
+    if (!errMessage) {
+      if (rawText && (rawText.trim().startsWith('<') || contentType.includes('text/html'))) {
+        errMessage = `Admin API unavailable (HTTP ${res.status}): Server returned HTML instead of JSON. Ensure the Node/Express backend (server.ts) is running and serving /api/admin/* routes.`;
+        isBackendUnavailable = true;
+      } else {
+        errMessage = `${fallbackMessage} (HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ''})`;
+      }
+    }
+
+    const err: any = new Error(errMessage);
+    err.status = res.status;
+    err.requiresMfa = Boolean(data?.requiresMfa);
+    err.requiresEnrollment = Boolean(data?.requiresEnrollment);
+    err.code = data?.error;
+    err.isBackendUnavailable = isBackendUnavailable || res.status === 404 || res.status === 502 || res.status === 503;
+    throw err;
+  }
+
+  if (data === null) {
+    const err: any = new Error(
+      `Admin API returned an unexpected non-JSON response (${contentType || 'unknown content-type'}). Ensure the backend server (server.ts) is running.`
+    );
+    err.isBackendUnavailable = true;
+    throw err;
+  }
+
   return data;
+}
+
+export async function checkAdminBackendHealth(): Promise<{
+  reachable: boolean;
+  status?: number;
+  detail?: string;
+}> {
+  try {
+    const res = await fetch('/api/health');
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    if (!res.ok || !contentType.includes('application/json')) {
+      return {
+        reachable: false,
+        status: res.status,
+        detail: `HTTP ${res.status} (${contentType || 'non-JSON response'})`,
+      };
+    }
+    const data = await res.json().catch(() => null);
+    if (data?.ok) {
+      return { reachable: true, status: res.status };
+    }
+    return { reachable: false, status: res.status, detail: 'Invalid health payload' };
+  } catch (err: any) {
+    return { reachable: false, detail: err?.message || 'Network unreachable' };
+  }
+}
+
+export async function fetchAdminOverview(adminEmail: string): Promise<any> {
+  const headers = await getAdminAuthHeaders(adminEmail);
+  const res = await safeAdminFetch('/api/admin/overview', { headers });
+  return parseAdminApiResponse(res, 'Failed to fetch administrator overview.');
 }
 
 export async function fetchAdminStudents(adminEmail: string, search?: string): Promise<any> {
   const headers = await getAdminAuthHeaders(adminEmail);
   const url = search ? `/api/admin/students?search=${encodeURIComponent(search)}` : '/api/admin/students';
-  const res = await fetch(url, { headers });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err: any = new Error(data.message || data.error || 'Failed to fetch students list.');
-    err.requiresMfa = Boolean(data.requiresMfa);
-    err.requiresEnrollment = Boolean(data.requiresEnrollment);
-    throw err;
-  }
-  return data;
+  const res = await safeAdminFetch(url, { headers });
+  return parseAdminApiResponse(res, 'Failed to fetch students list.');
 }
 
 export async function updateStudentStatus(
@@ -1599,31 +1688,18 @@ export async function updateStudentStatus(
   const headers = await getAdminAuthHeaders(adminEmail);
   headers['Content-Type'] = 'application/json';
 
-  const res = await fetch(`/api/admin/students/${studentId}/status`, {
+  const res = await safeAdminFetch(`/api/admin/students/${studentId}/status`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ status, reason }),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err: any = new Error(data.message || data.error || 'Failed to update student status.');
-    err.requiresMfa = Boolean(data.requiresMfa);
-    throw err;
-  }
-  return data;
+  return parseAdminApiResponse(res, 'Failed to update student status.');
 }
 
 export async function fetchAdminsList(adminEmail: string): Promise<any> {
   const headers = await getAdminAuthHeaders(adminEmail);
-  const res = await fetch('/api/admin/admins', { headers });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err: any = new Error(data.message || data.error || 'Failed to fetch administrators list.');
-    err.requiresMfa = Boolean(data.requiresMfa);
-    err.requiresEnrollment = Boolean(data.requiresEnrollment);
-    throw err;
-  }
-  return data;
+  const res = await safeAdminFetch('/api/admin/admins', { headers });
+  return parseAdminApiResponse(res, 'Failed to fetch administrators list.');
 }
 
 export async function inviteAdministrator(
@@ -1633,18 +1709,12 @@ export async function inviteAdministrator(
   const headers = await getAdminAuthHeaders(adminEmail);
   headers['Content-Type'] = 'application/json';
 
-  const res = await fetch('/api/admin/admins/invite', {
+  const res = await safeAdminFetch('/api/admin/admins/invite', {
     method: 'POST',
     headers,
     body: JSON.stringify(params),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err: any = new Error(data.message || data.error || 'Failed to send administrator invitation.');
-    err.requiresMfa = Boolean(data.requiresMfa);
-    throw err;
-  }
-  return data;
+  return parseAdminApiResponse(res, 'Failed to send administrator invitation.');
 }
 
 export async function updateAdminRole(
@@ -1655,79 +1725,48 @@ export async function updateAdminRole(
   const headers = await getAdminAuthHeaders(superAdminEmail);
   headers['Content-Type'] = 'application/json';
 
-  const res = await fetch(`/api/admin/admins/${targetId}/role`, {
+  const res = await safeAdminFetch(`/api/admin/admins/${targetId}/role`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ newRole }),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err: any = new Error(data.message || data.error || 'Failed to update administrator role.');
-    err.requiresMfa = Boolean(data.requiresMfa);
-    throw err;
-  }
-  return data;
+  return parseAdminApiResponse(res, 'Failed to update administrator role.');
 }
 
 export async function revokeAdminPrivileges(superAdminEmail: string, targetId: string): Promise<any> {
   const headers = await getAdminAuthHeaders(superAdminEmail);
   headers['Content-Type'] = 'application/json';
 
-  const res = await fetch(`/api/admin/admins/${targetId}/revoke`, {
+  const res = await safeAdminFetch(`/api/admin/admins/${targetId}/revoke`, {
     method: 'POST',
     headers,
     body: JSON.stringify({}),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err: any = new Error(data.message || data.error || 'Failed to revoke administrator privileges.');
-    err.requiresMfa = Boolean(data.requiresMfa);
-    throw err;
-  }
-  return data;
+  return parseAdminApiResponse(res, 'Failed to revoke administrator privileges.');
 }
 
 export async function fetchAdminAuditLogs(adminEmail: string): Promise<any> {
   const headers = await getAdminAuthHeaders(adminEmail);
-  const res = await fetch('/api/admin/audit-logs', { headers });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err: any = new Error(data.message || data.error || 'Failed to fetch audit logs.');
-    err.requiresMfa = Boolean(data.requiresMfa);
-    throw err;
-  }
-  return data;
+  const res = await safeAdminFetch('/api/admin/audit-logs', { headers });
+  return parseAdminApiResponse(res, 'Failed to fetch audit logs.');
 }
 
 export async function fetchSystemConfig(superAdminEmail: string): Promise<any> {
   const headers = await getAdminAuthHeaders(superAdminEmail);
-  const res = await fetch('/api/admin/system-config', { headers });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err: any = new Error(data.message || data.error || 'Failed to fetch system configuration.');
-    err.requiresMfa = Boolean(data.requiresMfa);
-    err.requiresEnrollment = Boolean(data.requiresEnrollment);
-    throw err;
-  }
-  return data;
+  const res = await safeAdminFetch('/api/admin/system-config', { headers });
+  return parseAdminApiResponse(res, 'Failed to fetch system configuration.');
 }
 
 export async function updateSystemConfig(superAdminEmail: string, config: any): Promise<any> {
   const headers = await getAdminAuthHeaders(superAdminEmail);
   headers['Content-Type'] = 'application/json';
 
-  const res = await fetch('/api/admin/system-config', {
+  const res = await safeAdminFetch('/api/admin/system-config', {
     method: 'POST',
     headers,
     body: JSON.stringify(config),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err: any = new Error(data.message || data.error || 'Failed to update system configuration.');
-    err.requiresMfa = Boolean(data.requiresMfa);
-    throw err;
-  }
-  return data;
+  return parseAdminApiResponse(res, 'Failed to update system configuration.');
 }
 
 // -------------------------------------------------------------

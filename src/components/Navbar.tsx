@@ -15,9 +15,10 @@ import {
   Database,
   LogIn,
   Settings,
+  Compass,
 } from 'lucide-react';
 import { LessonDocument, UserProfile } from '../types';
-import { checkIsConfigured } from '../lib/supabase';
+import { StudyBuddyLogo } from './StudyBuddyLogo';
 
 export type NavTab =
   | 'summarize'
@@ -37,9 +38,13 @@ interface NavbarProps {
   onOpenUpload: () => void;
   user: UserProfile;
   onOpenAuth: () => void;
+  onOpenSignup?: () => void;
   isLoggedIn?: boolean;
+  isDemoMode?: boolean;
+  onExitDemo?: () => void;
   onOpenAdminDashboard?: () => void;
   onOpenAccountModal?: () => void;
+  onOpenTutorial?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -51,16 +56,20 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenUpload,
   user,
   onOpenAuth,
+  onOpenSignup,
   isLoggedIn = false,
+  isDemoMode = false,
+  onExitDemo,
   onOpenAdminDashboard,
   onOpenAccountModal,
+  onOpenTutorial,
 }) => {
   const [showLessonDropdown, setShowLessonDropdown] = React.useState(false);
   const [showAllLessons, setShowAllLessons] = React.useState(false);
   const [showUserDropdown, setShowUserDropdown] = useState(false);
 
-  const isAdmin = user.role === 'admin' || user.role === 'super_admin';
-  const isSuperAdmin = user.role === 'super_admin';
+  const isAdmin = isLoggedIn && !isDemoMode && (user.role === 'admin' || user.role === 'super_admin');
+  const isSuperAdmin = isLoggedIn && !isDemoMode && user.role === 'super_admin';
 
   return (
     <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200 shadow-2xs">
@@ -68,11 +77,9 @@ export const Navbar: React.FC<NavbarProps> = ({
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4">
         {/* Logo and Brand */}
         <div className="flex items-center space-x-3 shrink-0">
-          <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-sky-600 via-sky-500 to-indigo-600 text-white flex items-center justify-center shadow-sm">
-            <BookOpen className="w-5 h-5" />
-          </div>
+          <StudyBuddyLogo size="md" />
           <div>
-            <h1 className="font-extrabold text-lg text-slate-900 tracking-tight">
+            <h1 className="font-extrabold text-lg text-slate-900 tracking-tight leading-tight">
               Study Buddy <span className="text-sky-600">AI</span>
             </h1>
             <p className="text-[11px] text-slate-500 font-medium">
@@ -156,6 +163,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={onOpenUpload}
+            data-tutorial-target="nav-upload"
             className="p-1.5 bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition-colors cursor-pointer"
             title="Upload or change PDF"
           >
@@ -164,9 +172,22 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
         </div>
 
-        {/* User Account / Profile / Administrator Portal */}
+        {/* Help & Tutorial + User Account / Profile / Administrator Portal */}
         <div className="flex items-center space-x-2 relative">
-          {isLoggedIn ? (
+          {onOpenTutorial && (
+            <button
+              type="button"
+              onClick={onOpenTutorial}
+              className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-xl text-xs font-bold flex items-center space-x-1.5 transition-colors cursor-pointer"
+              title="Open interactive step-by-step tutorial"
+            >
+              <Compass className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+              <span className="hidden md:inline">Help &amp; Tutorial</span>
+              <span className="md:hidden">Help</span>
+            </button>
+          )}
+
+          {isLoggedIn && !isDemoMode ? (
             <div className="flex items-center space-x-2">
               {/* Administrator Portal Quick Launch Button */}
               {isAdmin && (
@@ -188,7 +209,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               )}
 
               {/* Profile button */}
-              <div className="relative">
+              <div className="relative" data-tutorial-target="nav-account">
                 <button
                   onClick={() => setShowUserDropdown(!showUserDropdown)}
                   className="flex items-center space-x-2 p-1.5 pl-2.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl text-xs text-slate-700 transition-colors cursor-pointer"
@@ -271,6 +292,16 @@ export const Navbar: React.FC<NavbarProps> = ({
                         </button>
                       )}
 
+                      {onOpenTutorial && (
+                        <button
+                          onClick={onOpenTutorial}
+                          className="w-full text-left px-3.5 py-2 hover:bg-emerald-50 text-emerald-800 font-semibold flex items-center space-x-2 cursor-pointer"
+                        >
+                          <Compass className="w-4 h-4 text-emerald-600" />
+                          <span>Help &amp; Interactive Tutorial</span>
+                        </button>
+                      )}
+
                       <button
                         onClick={onOpenAuth}
                         className="w-full text-left px-3.5 py-2 hover:bg-slate-50 text-slate-700 font-medium flex items-center space-x-2 cursor-pointer"
@@ -283,9 +314,31 @@ export const Navbar: React.FC<NavbarProps> = ({
                 )}
               </div>
             </div>
+          ) : isDemoMode ? (
+            <div className="flex items-center space-x-2" data-tutorial-target="nav-account">
+              <span className="hidden sm:inline-flex items-center px-2.5 py-1 rounded-xl bg-amber-100 text-amber-900 border border-amber-300 text-[11px] font-extrabold">
+                DEMO MODE
+              </span>
+              <button
+                onClick={onOpenSignup || onOpenAuth}
+                className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center space-x-1.5 cursor-pointer"
+              >
+                <LogIn className="w-3.5 h-3.5" />
+                <span>Create Account</span>
+              </button>
+              {onExitDemo && (
+                <button
+                  onClick={onExitDemo}
+                  className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  Exit Demo
+                </button>
+              )}
+            </div>
           ) : (
             <button
               onClick={onOpenAuth}
+              data-tutorial-target="nav-account"
               className="px-3.5 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center space-x-1.5 cursor-pointer"
             >
               <LogIn className="w-3.5 h-3.5" />
@@ -300,6 +353,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         {/* Main 3 Learning Features */}
         <button
           onClick={() => onTabChange('summarize')}
+          data-tutorial-target="nav-tab-summarize"
           className={`px-3.5 py-2.5 text-xs font-bold rounded-t-xl flex items-center space-x-1.5 transition-all shrink-0 cursor-pointer ${
             currentTab === 'summarize'
               ? 'bg-sky-600 text-white shadow-xs'
@@ -312,6 +366,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         <button
           onClick={() => onTabChange('quiz')}
+          data-tutorial-target="nav-tab-quiz"
           className={`px-3.5 py-2.5 text-xs font-bold rounded-t-xl flex items-center space-x-1.5 transition-all shrink-0 cursor-pointer ${
             currentTab === 'quiz'
               ? 'bg-sky-600 text-white shadow-xs'
@@ -324,6 +379,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         <button
           onClick={() => onTabChange('tutor')}
+          data-tutorial-target="nav-tab-tutor"
           className={`px-3.5 py-2.5 text-xs font-bold rounded-t-xl flex items-center space-x-1.5 transition-all shrink-0 cursor-pointer ${
             currentTab === 'tutor'
               ? 'bg-sky-600 text-white shadow-xs'
@@ -363,6 +419,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         <button
           onClick={() => onTabChange('timer')}
+          data-tutorial-target="nav-tab-timer"
           className={`px-3 py-2.5 text-xs font-semibold rounded-t-xl flex items-center space-x-1.5 transition-all shrink-0 cursor-pointer ${
             currentTab === 'timer'
               ? 'bg-slate-800 text-white shadow-xs'
@@ -375,6 +432,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         <button
           onClick={() => onTabChange('progress')}
+          data-tutorial-target="nav-tab-progress"
           className={`px-3 py-2.5 text-xs font-semibold rounded-t-xl flex items-center space-x-1.5 transition-all shrink-0 cursor-pointer ${
             currentTab === 'progress'
               ? 'bg-slate-800 text-white shadow-xs'

@@ -48,8 +48,10 @@ import {
   updateSystemConfig,
   getActiveSupabaseConfig,
   fetchMfaStatus,
+  checkAdminBackendHealth,
 } from '../lib/supabase';
 import { AdminMfaModal } from './AdminMfaModal';
+import { StudyBuddyLogo } from './StudyBuddyLogo';
 
 interface AdminDashboardModalProps {
   isOpen: boolean;
@@ -98,7 +100,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
   const [systemConfig, setSystemConfig] = useState<any>(null);
   const [configLoading, setConfigLoading] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
-  const [selectedModels, setSelectedModels] = useState<string[]>(['gemini-2.5-flash', 'gemini-2.5-pro']);
+  const [selectedModels, setSelectedModels] = useState<string[]>(['gemini-4-hydrogen', 'gemini-3.1-flash-lite']);
   const [defaultDifficulty, setDefaultDifficulty] = useState('medium');
   const [maxQuestionCount, setMaxQuestionCount] = useState(100);
   const [rateLimitRpm, setRateLimitRpm] = useState(60);
@@ -109,32 +111,68 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
   const [auditFilter, setAuditFilter] = useState<string>('all');
   const [auditSearch, setAuditSearch] = useState('');
 
-  // Status & Feedback Messages
+  // Status, Diagnostics & In-Modal Confirmation State
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [backendReachable, setBackendReachable] = useState<boolean | null>(null);
+  const [studentsError, setStudentsError] = useState<string | null>(null);
+  const [adminsError, setAdminsError] = useState<string | null>(null);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [mfaRequiredNotice, setMfaRequiredNotice] = useState<{ title: string; message: string } | null>(null);
+  const [pendingStatusAction, setPendingStatusAction] = useState<{
+    student: any;
+    newStatus: 'active' | 'suspended';
+    reason: string;
+  } | null>(null);
+  const [pendingRoleAction, setPendingRoleAction] = useState<{
+    type: 'role' | 'revoke';
+    targetAdmin: any;
+    newRole?: 'admin' | 'super_admin' | 'student';
+  } | null>(null);
 
   useEffect(() => {
     if (isOpen && isAdmin) {
       setFeedback(null);
+      setMfaRequiredNotice(null);
+      checkAdminBackendHealth().then((h) => setBackendReachable(h.reachable));
       loadOverview();
-      if (activeTab === 'students') loadStudents();
-      if (activeTab === 'admins') loadAdmins();
-      if (activeTab === 'settings' && isSuperAdmin) loadSystemConfig();
-      if (activeTab === 'audit') loadAuditLogs();
     }
+  }, [isOpen, currentUser.email]);
+
+  useEffect(() => {
+    if (!isOpen || !isAdmin) return;
+    if (activeTab === 'students') loadStudents();
+    if (activeTab === 'admins') loadAdmins();
+    if (activeTab === 'settings' && isSuperAdmin) loadSystemConfig();
+    if (activeTab === 'audit') loadAuditLogs();
   }, [isOpen, activeTab, currentUser.email]);
+
+  const handleAdminApiError = (err: any, sectionTitle: string, setTabError?: (msg: string | null) => void) => {
+    if (err?.isBackendUnavailable) {
+      setBackendReachable(false);
+    }
+    if (err?.requiresMfa) {
+      setMfaTargetTitle(sectionTitle);
+      setMfaRequiredNotice({
+        title: sectionTitle,
+        message: err.message || 'Multi-Factor Authentication (AAL2) verification is required.',
+      });
+      setShowMfaModal(true);
+    }
+    const msg = err?.message || `Failed to load ${sectionTitle.toLowerCase()}.`;
+    if (setTabError) setTabError(msg);
+    setFeedback({ type: 'error', message: msg });
+  };
 
   const loadOverview = async () => {
     setOverviewLoading(true);
     try {
       const data = await fetchAdminOverview(currentUser.email);
       setOverviewData(data);
+      setBackendReachable(true);
+      setMfaRequiredNotice(null);
       setCurrentAal('aal2');
     } catch (err: any) {
-      if (err.requiresMfa) {
-        setMfaTargetTitle('Administrator Security Center');
-        setShowMfaModal(true);
-      }
-      console.warn('Overview fetch notice:', err.message);
+      handleAdminApiError(err, 'Administrator Security Center');
     } finally {
       setOverviewLoading(false);
     }
@@ -142,18 +180,17 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
 
   const loadStudents = async () => {
     setStudentsLoading(true);
+    setStudentsError(null);
     try {
       const data = await fetchAdminStudents(currentUser.email, studentSearch);
       if (data?.students) {
         setStudentsList(data.students);
       }
+      setBackendReachable(true);
+      setMfaRequiredNotice(null);
       setCurrentAal('aal2');
     } catch (err: any) {
-      if (err.requiresMfa) {
-        setMfaTargetTitle('Student Account Management');
-        setShowMfaModal(true);
-      }
-      setFeedback({ type: 'error', message: err.message || 'Failed to load students.' });
+      handleAdminApiError(err, 'Student Account Management', setStudentsError);
     } finally {
       setStudentsLoading(false);
     }
@@ -161,6 +198,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
 
   const loadAdmins = async () => {
     setAdminsLoading(true);
+    setAdminsError(null);
     try {
       const data = await fetchAdminsList(currentUser.email);
       if (data?.admins) {
@@ -169,13 +207,11 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
       if (data?.invitations) {
         setInvitationsList(data.invitations);
       }
+      setBackendReachable(true);
+      setMfaRequiredNotice(null);
       setCurrentAal('aal2');
     } catch (err: any) {
-      if (err.requiresMfa) {
-        setMfaTargetTitle('Administrator Management');
-        setShowMfaModal(true);
-      }
-      setFeedback({ type: 'error', message: err.message || 'Failed to load administrators.' });
+      handleAdminApiError(err, 'Administrator Management', setAdminsError);
     } finally {
       setAdminsLoading(false);
     }
@@ -188,18 +224,16 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
       const data = await fetchSystemConfig(currentUser.email);
       if (data?.config) {
         setSystemConfig(data.config);
-        setSelectedModels(data.config.allowedModels || ['gemini-2.5-flash']);
+        setSelectedModels(data.config.allowedModels || ['gemini-4-hydrogen']);
         setDefaultDifficulty(data.config.defaultDifficulty || 'medium');
         setMaxQuestionCount(data.config.maxQuestionCount || 100);
         setRateLimitRpm(data.config.rateLimitRpm || 60);
       }
+      setBackendReachable(true);
+      setMfaRequiredNotice(null);
       setCurrentAal('aal2');
     } catch (err: any) {
-      if (err.requiresMfa) {
-        setMfaTargetTitle('Developer & Cloud Settings');
-        setShowMfaModal(true);
-      }
-      setFeedback({ type: 'error', message: err.message || 'Failed to load system configuration.' });
+      handleAdminApiError(err, 'Developer & Cloud Settings');
     } finally {
       setConfigLoading(false);
     }
@@ -207,38 +241,42 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
 
   const loadAuditLogs = async () => {
     setAuditLoading(true);
+    setAuditError(null);
     try {
       const data = await fetchAdminAuditLogs(currentUser.email);
       if (data?.logs) {
         setAuditLogs(data.logs);
       }
+      setBackendReachable(true);
+      setMfaRequiredNotice(null);
       setCurrentAal('aal2');
     } catch (err: any) {
-      if (err.requiresMfa) {
-        setMfaTargetTitle('Security Audit Logs');
-        setShowMfaModal(true);
-      }
-      setFeedback({ type: 'error', message: err.message || 'Failed to load audit logs.' });
+      handleAdminApiError(err, 'Security Audit Logs', setAuditError);
     } finally {
       setAuditLoading(false);
     }
   };
 
-  // Toggle student status (active <-> suspended)
-  const handleToggleStudentStatus = async (student: any) => {
-    const newStatus = student.accountStatus === 'suspended' ? 'active' : 'suspended';
-    const reason = prompt(
-      `Enter reason for ${newStatus === 'suspended' ? 'suspending' : 'restoring'} student ${student.fullName}:`,
-      newStatus === 'suspended' ? 'Violated student terms of service' : 'Account reviewed and restored'
-    );
-    if (reason === null) return;
+  // Toggle student status (active <-> suspended) via in-modal dialog
+  const handleToggleStudentStatus = (student: any) => {
+    const newStatus: 'active' | 'suspended' = student.accountStatus === 'suspended' ? 'active' : 'suspended';
+    setPendingStatusAction({
+      student,
+      newStatus,
+      reason: newStatus === 'suspended' ? 'Violated student terms of service' : 'Account reviewed and restored',
+    });
+  };
 
+  const confirmStudentStatusUpdate = async () => {
+    if (!pendingStatusAction) return;
+    const { student, newStatus, reason } = pendingStatusAction;
     try {
       await updateStudentStatus(currentUser.email, student.id, newStatus, reason);
       setFeedback({
         type: 'success',
         message: `Student account for ${student.fullName} has been set to ${newStatus}.`,
       });
+      setPendingStatusAction(null);
       loadStudents();
       loadOverview();
     } catch (err: any) {
@@ -284,47 +322,39 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
   };
 
   // Change Admin Role
-  const handleChangeAdminRole = async (targetAdmin: any, newRole: 'admin' | 'super_admin' | 'student') => {
+  const handleChangeAdminRole = (targetAdmin: any, newRole: 'admin' | 'super_admin' | 'student') => {
     if (!isSuperAdmin) {
       setFeedback({ type: 'error', message: 'Only a Super Administrator can change administrator roles.' });
       return;
     }
-
-    const actionWord = newRole === 'super_admin' ? 'promote' : newRole === 'admin' ? 'demote' : 'revoke';
-    const confirmPrompt = window.confirm(
-      `Are you sure you want to ${actionWord} ${targetAdmin.fullName} (${targetAdmin.email}) to ${newRole.toUpperCase()}?`
-    );
-    if (!confirmPrompt) return;
-
-    try {
-      const res = await updateAdminRole(currentUser.email, targetAdmin.id || targetAdmin.email, newRole);
-      setFeedback({ type: 'success', message: res.message });
-      loadAdmins();
-      loadOverview();
-    } catch (err: any) {
-      setFeedback({ type: 'error', message: err.message || 'Failed to update role.' });
-    }
+    setPendingRoleAction({ type: 'role', targetAdmin, newRole });
   };
 
   // Revoke Admin
-  const handleRevokeAdmin = async (targetAdmin: any) => {
+  const handleRevokeAdmin = (targetAdmin: any) => {
     if (!isSuperAdmin) {
       setFeedback({ type: 'error', message: 'Only a Super Administrator can revoke administrative privileges.' });
       return;
     }
+    setPendingRoleAction({ type: 'revoke', targetAdmin });
+  };
 
-    const confirmPrompt = window.confirm(
-      `Revoke ALL administrative privileges from ${targetAdmin.fullName} (${targetAdmin.email})? Their role will become Student.`
-    );
-    if (!confirmPrompt) return;
-
+  const confirmPendingRoleAction = async () => {
+    if (!pendingRoleAction) return;
+    const { type, targetAdmin, newRole } = pendingRoleAction;
     try {
-      const res = await revokeAdminPrivileges(currentUser.email, targetAdmin.id || targetAdmin.email);
-      setFeedback({ type: 'success', message: res.message });
+      if (type === 'role' && newRole) {
+        const res = await updateAdminRole(currentUser.email, targetAdmin.id || targetAdmin.email, newRole);
+        setFeedback({ type: 'success', message: res.message });
+      } else if (type === 'revoke') {
+        const res = await revokeAdminPrivileges(currentUser.email, targetAdmin.id || targetAdmin.email);
+        setFeedback({ type: 'success', message: res.message });
+      }
+      setPendingRoleAction(null);
       loadAdmins();
       loadOverview();
     } catch (err: any) {
-      setFeedback({ type: 'error', message: err.message || 'Failed to revoke administrator.' });
+      setFeedback({ type: 'error', message: err.message || 'Failed to update administrator privileges.' });
     }
   };
 
@@ -349,7 +379,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
     }
   };
 
-  if (!isOpen) return null;
+  if (!isOpen || !isAdmin || currentUser.id === 'demo-visitor-session') return null;
 
   // Filtered students
   const filteredStudents = studentsList.filter((s) => {
@@ -381,9 +411,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
         {/* Top Header */}
         <div className="px-6 py-4 bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white flex items-center justify-between shrink-0 border-b border-white/10">
           <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-2xl bg-indigo-500/20 border border-indigo-400/30 flex items-center justify-center text-indigo-300 shadow-inner">
-              <ShieldCheck className="w-5 h-5 text-indigo-300" />
-            </div>
+            <StudyBuddyLogo size="sm" />
             <div>
               <div className="flex items-center space-x-2">
                 <h2 className="text-lg font-bold text-white tracking-tight">
@@ -418,26 +446,51 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
         {/* Feedback Alert Bar */}
         {feedback && (
           <div
-            className={`px-6 py-2.5 text-xs font-semibold flex items-center justify-between border-b ${
+            className={`px-6 py-2.5 text-xs font-semibold flex items-center justify-between gap-3 border-b ${
               feedback.type === 'success'
                 ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
                 : 'bg-rose-50 text-rose-800 border-rose-200'
             }`}
           >
-            <div className="flex items-center space-x-2">
+            <div className="flex items-center space-x-2 min-w-0">
               {feedback.type === 'success' ? (
                 <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
               ) : (
                 <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
               )}
-              <span>{feedback.message}</span>
+              <span className="break-words">{feedback.message}</span>
             </div>
-            <button
-              onClick={() => setFeedback(null)}
-              className="text-slate-400 hover:text-slate-600 cursor-pointer"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
+            <div className="flex items-center space-x-2 shrink-0">
+              {mfaRequiredNotice && (
+                <button
+                  onClick={() => setShowMfaModal(true)}
+                  className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-[11px] font-bold cursor-pointer"
+                >
+                  Verify MFA
+                </button>
+              )}
+              {feedback.type === 'error' && (
+                <button
+                  onClick={() => {
+                    setFeedback(null);
+                    if (activeTab === 'overview') loadOverview();
+                    if (activeTab === 'students') loadStudents();
+                    if (activeTab === 'admins') loadAdmins();
+                    if (activeTab === 'settings' && isSuperAdmin) loadSystemConfig();
+                    if (activeTab === 'audit') loadAuditLogs();
+                  }}
+                  className="px-2.5 py-1 bg-white hover:bg-rose-100 text-rose-800 border border-rose-200 rounded-lg text-[11px] font-bold cursor-pointer"
+                >
+                  Retry
+                </button>
+              )}
+              <button
+                onClick={() => setFeedback(null)}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         )}
 
@@ -456,10 +509,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
           </button>
 
           <button
-            onClick={() => {
-              setActiveTab('students');
-              loadStudents();
-            }}
+            onClick={() => setActiveTab('students')}
             className={`px-3.5 py-2 text-xs font-bold rounded-xl flex items-center space-x-2 transition-all cursor-pointer ${
               activeTab === 'students'
                 ? 'bg-white text-indigo-900 shadow-xs border border-slate-200'
@@ -476,10 +526,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
           </button>
 
           <button
-            onClick={() => {
-              setActiveTab('admins');
-              loadAdmins();
-            }}
+            onClick={() => setActiveTab('admins')}
             className={`px-3.5 py-2 text-xs font-bold rounded-xl flex items-center space-x-2 transition-all cursor-pointer ${
               activeTab === 'admins'
                 ? 'bg-white text-indigo-900 shadow-xs border border-slate-200'
@@ -491,10 +538,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
           </button>
 
           <button
-            onClick={() => {
-              setActiveTab('settings');
-              if (isSuperAdmin) loadSystemConfig();
-            }}
+            onClick={() => setActiveTab('settings')}
             className={`px-3.5 py-2 text-xs font-bold rounded-xl flex items-center space-x-2 transition-all cursor-pointer ${
               activeTab === 'settings'
                 ? 'bg-white text-indigo-900 shadow-xs border border-slate-200'
@@ -511,10 +555,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
           </button>
 
           <button
-            onClick={() => {
-              setActiveTab('audit');
-              loadAuditLogs();
-            }}
+            onClick={() => setActiveTab('audit')}
             className={`px-3.5 py-2 text-xs font-bold rounded-xl flex items-center space-x-2 transition-all cursor-pointer ${
               activeTab === 'audit'
                 ? 'bg-white text-indigo-900 shadow-xs border border-slate-200'
@@ -548,7 +589,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                         <Users className="w-4 h-4 text-sky-600" />
                       </div>
                       <div className="text-2xl font-black text-slate-900">
-                        {overviewData?.totalStudents ?? 1}
+                        {overviewData?.totalStudents ?? '—'}
                       </div>
                       <span className="text-[11px] text-emerald-600 font-medium">Standard public accounts</span>
                     </div>
@@ -559,10 +600,12 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                         <Shield className="w-4 h-4 text-indigo-600" />
                       </div>
                       <div className="text-2xl font-black text-slate-900">
-                        {(overviewData?.totalAdmins ?? 0) + (overviewData?.totalSuperAdmins ?? 1)}
+                        {overviewData ? (overviewData.totalAdmins ?? 0) + (overviewData.totalSuperAdmins ?? 0) : '—'}
                       </div>
                       <span className="text-[11px] text-indigo-600 font-medium">
-                        {overviewData?.totalSuperAdmins ?? 1} Super / {overviewData?.totalAdmins ?? 0} Ordinary
+                        {overviewData
+                          ? `${overviewData.totalSuperAdmins ?? 0} Super / ${overviewData.totalAdmins ?? 0} Ordinary`
+                          : 'Awaiting verified telemetry'}
                       </span>
                     </div>
 
@@ -572,7 +615,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                         <UserX className="w-4 h-4 text-rose-500" />
                       </div>
                       <div className="text-2xl font-black text-slate-900">
-                        {overviewData?.suspendedAccounts ?? 0}
+                        {overviewData?.suspendedAccounts ?? '—'}
                       </div>
                       <span className="text-[11px] text-slate-500">Access disabled accounts</span>
                     </div>
@@ -583,7 +626,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                         <FileText className="w-4 h-4 text-amber-500" />
                       </div>
                       <div className="text-2xl font-black text-slate-900">
-                        {overviewData?.totalAuditLogs ?? 1}
+                        {overviewData?.totalAuditLogs ?? '—'}
                       </div>
                       <span className="text-[11px] text-amber-600 font-medium">Immutable logged events</span>
                     </div>
@@ -609,7 +652,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                       <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
                         <span>Active Default Model:</span>
                         <code className="font-mono bg-slate-100 px-2 py-0.5 rounded text-indigo-700 font-bold">
-                          {overviewData?.primaryModel || 'gemini-2.5-flash'}
+                          {overviewData?.primaryModel || 'gemini-4-hydrogen'}
                         </code>
                       </div>
                     </div>
@@ -637,8 +680,8 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                       </div>
                       <p className="text-xs text-slate-600 leading-relaxed">
                         Row-Level Security (RLS) policies safeguard student records, quiz results, and learning materials.
-                        Initial Super Administrator bootstrap is active for{' '}
-                        <strong>{overviewData?.initialAdminEmail || 'historillo.noel1994@gmail.com'}</strong>.
+                        Initial Super Administrator bootstrap is locked and active for{' '}
+                        <strong>{overviewData?.initialAdminEmail || 'Primary Super Administrator'}</strong>.
                       </p>
                       <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
                         <span>Protected Tables:</span>
@@ -656,10 +699,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                     </h4>
                     <div className="flex flex-wrap gap-2.5">
                       <button
-                        onClick={() => {
-                          setActiveTab('students');
-                          loadStudents();
-                        }}
+                        onClick={() => setActiveTab('students')}
                         className="px-3.5 py-2 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold rounded-xl border border-slate-200 shadow-2xs flex items-center space-x-1.5 cursor-pointer"
                       >
                         <Users className="w-4 h-4 text-sky-600" />
@@ -678,10 +718,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                       </button>
 
                       <button
-                        onClick={() => {
-                          setActiveTab('audit');
-                          loadAuditLogs();
-                        }}
+                        onClick={() => setActiveTab('audit')}
                         className="px-3.5 py-2 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold rounded-xl border border-slate-200 shadow-2xs flex items-center space-x-1.5 cursor-pointer"
                       >
                         <History className="w-4 h-4 text-amber-600" />
@@ -690,10 +727,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
 
                       {isSuperAdmin && (
                         <button
-                          onClick={() => {
-                            setActiveTab('settings');
-                            loadSystemConfig();
-                          }}
+                          onClick={() => setActiveTab('settings')}
                           className="px-3.5 py-2 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold rounded-xl border border-slate-200 shadow-2xs flex items-center space-x-1.5 cursor-pointer"
                         >
                           <Sliders className="w-4 h-4 text-indigo-600" />
@@ -751,6 +785,28 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                 <div className="py-12 flex flex-col items-center justify-center text-slate-400 space-y-2">
                   <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
                   <p className="text-xs">Loading registered students...</p>
+                </div>
+              ) : studentsError ? (
+                <div className="bg-rose-50/60 p-8 rounded-2xl border border-rose-200 text-center space-y-3">
+                  <AlertCircle className="w-8 h-8 text-rose-500 mx-auto" />
+                  <h4 className="text-sm font-bold text-rose-900">Unable to Load Student Accounts</h4>
+                  <p className="text-xs text-rose-700 max-w-md mx-auto leading-relaxed">{studentsError}</p>
+                  <div className="flex items-center justify-center gap-2 pt-1">
+                    {mfaRequiredNotice && (
+                      <button
+                        onClick={() => setShowMfaModal(true)}
+                        className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold cursor-pointer"
+                      >
+                        Verify MFA Now
+                      </button>
+                    )}
+                    <button
+                      onClick={loadStudents}
+                      className="px-4 py-1.5 bg-white hover:bg-rose-50 text-rose-800 border border-rose-200 rounded-xl text-xs font-bold cursor-pointer"
+                    >
+                      Retry Fetch
+                    </button>
+                  </div>
                 </div>
               ) : filteredStudents.length === 0 ? (
                 <div className="bg-white p-8 rounded-2xl border border-slate-200 text-center space-y-2">
@@ -973,21 +1029,51 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                   <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
                   <p className="text-xs">Loading administrators...</p>
                 </div>
+              ) : adminsError ? (
+                <div className="bg-rose-50/60 p-8 rounded-2xl border border-rose-200 text-center space-y-3">
+                  <AlertCircle className="w-8 h-8 text-rose-500 mx-auto" />
+                  <h4 className="text-sm font-bold text-rose-900">Unable to Load Administrators</h4>
+                  <p className="text-xs text-rose-700 max-w-md mx-auto leading-relaxed">{adminsError}</p>
+                  <div className="flex items-center justify-center gap-2 pt-1">
+                    {mfaRequiredNotice && (
+                      <button
+                        onClick={() => setShowMfaModal(true)}
+                        className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold cursor-pointer"
+                      >
+                        Verify MFA Now
+                      </button>
+                    )}
+                    <button
+                      onClick={loadAdmins}
+                      className="px-4 py-1.5 bg-white hover:bg-rose-50 text-rose-800 border border-rose-200 rounded-xl text-xs font-bold cursor-pointer"
+                    >
+                      Retry Fetch
+                    </button>
+                  </div>
+                </div>
               ) : (
                 <div className="space-y-4">
                   <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
                     <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-700 flex items-center justify-between">
                       <span>Active System Administrators ({adminsList.length})</span>
-                      <span className="text-[11px] text-slate-500 font-normal">
-                        Role-Based Access Control Active
-                      </span>
+                      <div className="flex items-center space-x-2">
+                        <span className="text-[11px] text-slate-500 font-normal">
+                          Role-Based Access Control Active
+                        </span>
+                        <button
+                          onClick={loadAdmins}
+                          className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-600 cursor-pointer"
+                          title="Refresh administrator list"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${adminsLoading ? 'animate-spin' : ''}`} />
+                        </button>
+                      </div>
                     </div>
 
                     <div className="divide-y divide-slate-100">
                       {adminsList.map((admin) => {
                         const isThisSuperAdmin = admin.role === 'super_admin';
-                        const isInitialSuper =
-                          admin.email.toLowerCase() === 'historillo.noel1994@gmail.com' || admin.isInitialSuperAdmin;
+                        const isInitialSuper = Boolean(admin.isInitialSuperAdmin);
 
                         return (
                           <div
@@ -1433,6 +1519,28 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                   <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
                   <p className="text-xs">Loading immutable audit logs...</p>
                 </div>
+              ) : auditError ? (
+                <div className="bg-rose-50/60 p-8 rounded-2xl border border-rose-200 text-center space-y-3">
+                  <AlertCircle className="w-8 h-8 text-rose-500 mx-auto" />
+                  <h4 className="text-sm font-bold text-rose-900">Unable to Load Security Audit Logs</h4>
+                  <p className="text-xs text-rose-700 max-w-md mx-auto leading-relaxed">{auditError}</p>
+                  <div className="flex items-center justify-center gap-2 pt-1">
+                    {mfaRequiredNotice && (
+                      <button
+                        onClick={() => setShowMfaModal(true)}
+                        className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold cursor-pointer"
+                      >
+                        Verify MFA Now
+                      </button>
+                    )}
+                    <button
+                      onClick={loadAuditLogs}
+                      className="px-4 py-1.5 bg-white hover:bg-rose-50 text-rose-800 border border-rose-200 rounded-xl text-xs font-bold cursor-pointer"
+                    >
+                      Retry Fetch
+                    </button>
+                  </div>
+                </div>
               ) : filteredAuditLogs.length === 0 ? (
                 <div className="bg-white p-8 rounded-2xl border border-slate-200 text-center space-y-2">
                   <History className="w-8 h-8 text-slate-300 mx-auto" />
@@ -1488,8 +1596,23 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
         {/* Modal Footer */}
         <div className="px-6 py-3 bg-white border-t border-slate-200 flex items-center justify-between text-xs text-slate-500 shrink-0">
           <div className="flex items-center space-x-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-500" />
-            <span>Role-Based Access Control Enforced • Server Validated</span>
+            <span
+              className={`w-2 h-2 rounded-full ${
+                backendReachable === false
+                  ? 'bg-rose-500'
+                  : backendReachable === true
+                  ? 'bg-emerald-500'
+                  : 'bg-amber-400'
+              }`}
+            />
+            <span>
+              Role-Based Access Control Enforced •{' '}
+              {backendReachable === false
+                ? 'Backend API Unreachable'
+                : backendReachable === true
+                ? 'Server Validated'
+                : 'Checking Server Connection...'}
+            </span>
           </div>
 
           <button
@@ -1500,6 +1623,76 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
           </button>
         </div>
       </div>
+
+      {/* In-Modal Student Suspend / Restore Confirmation */}
+      {pendingStatusAction && (
+        <div className="fixed inset-0 z-60 bg-slate-900/60 backdrop-blur-2xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 border border-slate-200 shadow-2xl">
+            <h4 className="text-base font-bold text-slate-900">
+              {pendingStatusAction.newStatus === 'suspended' ? 'Suspend Student Account' : 'Restore Student Account'}
+            </h4>
+            <p className="text-xs text-slate-600">
+              Enter reason for {pendingStatusAction.newStatus === 'suspended' ? 'suspending' : 'restoring'}{' '}
+              <strong>{pendingStatusAction.student.fullName}</strong> ({pendingStatusAction.student.email}):
+            </p>
+            <input
+              type="text"
+              value={pendingStatusAction.reason}
+              onChange={(e) => setPendingStatusAction({ ...pendingStatusAction, reason: e.target.value })}
+              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
+              placeholder="Reason for administrative action..."
+            />
+            <div className="flex items-center justify-end space-x-2 pt-2">
+              <button
+                onClick={() => setPendingStatusAction(null)}
+                className="px-4 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmStudentStatusUpdate}
+                className={`px-4 py-1.5 rounded-xl text-xs font-bold text-white cursor-pointer ${
+                  pendingStatusAction.newStatus === 'suspended'
+                    ? 'bg-rose-600 hover:bg-rose-700'
+                    : 'bg-emerald-600 hover:bg-emerald-700'
+                }`}
+              >
+                Confirm {pendingStatusAction.newStatus === 'suspended' ? 'Suspension' : 'Restore'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* In-Modal Admin Role / Revoke Confirmation */}
+      {pendingRoleAction && (
+        <div className="fixed inset-0 z-60 bg-slate-900/60 backdrop-blur-2xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 border border-slate-200 shadow-2xl">
+            <h4 className="text-base font-bold text-slate-900">
+              {pendingRoleAction.type === 'revoke' ? 'Revoke Administrator Privileges' : 'Confirm Role Change'}
+            </h4>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              {pendingRoleAction.type === 'revoke'
+                ? `Revoke all administrative privileges from ${pendingRoleAction.targetAdmin.fullName} (${pendingRoleAction.targetAdmin.email})? Their account will be set to Student.`
+                : `Are you sure you want to change ${pendingRoleAction.targetAdmin.fullName} (${pendingRoleAction.targetAdmin.email}) to ${pendingRoleAction.newRole?.toUpperCase()}?`}
+            </p>
+            <div className="flex items-center justify-end space-x-2 pt-2">
+              <button
+                onClick={() => setPendingRoleAction(null)}
+                className="px-4 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmPendingRoleAction}
+                className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold cursor-pointer"
+              >
+                Confirm Change
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Mandatory MFA Challenge Verification Modal */}
       <AdminMfaModal
@@ -1513,6 +1706,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
         targetSectionTitle={mfaTargetTitle}
         onSuccess={() => {
           setShowMfaModal(false);
+          setMfaRequiredNotice(null);
           setCurrentAal('aal2');
           setFeedback({
             type: 'success',

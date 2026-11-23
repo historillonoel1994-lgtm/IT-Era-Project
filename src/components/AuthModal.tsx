@@ -30,9 +30,9 @@ import {
   signOutStudent,
   getActiveSupabaseConfig,
   verifyUserRoleWithServer,
-  triggerInitialSuperAdminBootstrap,
   sendPasswordResetEmail,
 } from '../lib/supabase';
+import { StudyBuddyLogo } from './StudyBuddyLogo';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -59,21 +59,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // Student Submode: 'login' | 'signup' | 'forgot_password'
   const [studentMode, setStudentMode] = useState<'login' | 'signup' | 'forgot_password'>('login');
 
-  // Form Fields
-  const [fullName, setFullName] = useState(currentUser.fullName);
-  const [email, setEmail] = useState(currentUser.email);
+  // Form Fields (never pre-fill admin or demo emails)
+  const [fullName, setFullName] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [degree, setDegree] = useState(currentUser.degree);
-  const [jobTitle, setJobTitle] = useState(currentUser.jobTitle);
+  const [degree, setDegree] = useState('');
+  const [jobTitle, setJobTitle] = useState('');
 
   // Feedback states
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
-
-  // Initial Super Admin Quick Activation status
-  const [isBootstrappingInitial, setIsBootstrappingInitial] = useState(false);
 
   const switchStudentMode = (nextMode: 'login' | 'signup' | 'forgot_password') => {
     setStudentMode(nextMode);
@@ -96,6 +93,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       if (initialMode === 'admin_login') {
         setLoginType('admin');
         setStudentMode('login');
+        setEmail('');
       } else if (initialMode === 'signup') {
         setLoginType('student');
         setStudentMode('signup');
@@ -106,10 +104,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       } else {
         setLoginType('student');
         setStudentMode('login');
-        setFullName(currentUser.fullName);
-        setEmail(currentUser.email);
-        setDegree(currentUser.degree);
-        setJobTitle(currentUser.jobTitle);
+        const isSafePrefill =
+          currentUser.id !== 'demo-visitor-session' &&
+          currentUser.role === 'student' &&
+          currentUser.email &&
+          !currentUser.email.endsWith('.sample');
+        setFullName(isSafePrefill ? currentUser.fullName : '');
+        setEmail(isSafePrefill ? currentUser.email : '');
+        setDegree(isSafePrefill ? currentUser.degree : '');
+        setJobTitle(isSafePrefill ? currentUser.jobTitle : '');
       }
     }
   }, [isOpen, initialMode]);
@@ -214,39 +217,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         }, 800);
         return;
       } else {
-        // Local offline check if Supabase is unconfigured
-        const roleRes = await verifyUserRoleWithServer({ email: cleanEmail });
+        // Strict security enforcement: Administrator login NEVER bypasses real Supabase authentication
         setLoading(false);
-        if (!roleRes.isAdmin) {
-          setErrorMessage(
-            `Access Denied: The account "${cleanEmail}" does not possess administrative privileges.`
-          );
-          return;
-        }
-
-        const adminProfile: UserProfile = {
-          id: 'admin-super-noel-01',
-          fullName: 'Noel Historillo',
-          email: cleanEmail,
-          role: 'super_admin',
-          degree: 'Master of Science in Information Technology',
-          jobTitle: 'Super Administrator',
-          avatarSeed: 'noel-historillo',
-          accountStatus: 'active',
-        };
-        if (adminProfile.id !== currentUser.id) {
-          resetUserScopedLocalData(adminProfile.id);
-        }
-        saveUserProfile(adminProfile);
-        setLoggedIn(true);
-        onUserChange(adminProfile);
-        setSuccessMessage(`Welcome, Super Administrator Noel Historillo!`);
-        setTimeout(() => {
-          onClose();
-          if (onOpenAdminDashboard) {
-            onOpenAdminDashboard();
-          }
-        }, 800);
+        setErrorMessage(
+          'Administrator sign-in requires active Supabase Authentication. Offline or shortcut administrator access is disabled for security.'
+        );
         return;
       }
     }
@@ -420,46 +395,29 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
-  // Quick initial Super Administrator setup trigger (for Noel Historillo)
-  const handleBootstrapInitialAdmin = async () => {
-    setIsBootstrappingInitial(true);
-    setErrorMessage(null);
-    setSuccessMessage(null);
-    const res = await triggerInitialSuperAdminBootstrap({
-      email: 'historillo.noel1994@gmail.com',
-      fullName: 'Noel Historillo',
-    });
-    setIsBootstrappingInitial(false);
-
-    if (res.success) {
-      setSuccessMessage(res.message);
-      setEmail('historillo.noel1994@gmail.com');
-      setLoginType('admin');
-    } else {
-      setErrorMessage(res.message);
-    }
-  };
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn">
       <div className="bg-white rounded-3xl shadow-2xl border border-slate-200/90 max-w-lg w-full overflow-hidden flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="px-6 py-4 bg-gradient-to-r from-slate-900 via-sky-950 to-indigo-950 text-white flex items-center justify-between">
-          <div className="space-y-0.5">
-            <div className="flex items-center space-x-2">
-              <h3 className="font-extrabold text-base text-white tracking-tight">
-                Study Buddy AI Authentication
-              </h3>
-              <span className="px-2 py-0.5 bg-sky-500/20 text-sky-200 border border-sky-400/30 text-[10px] rounded-full font-semibold flex items-center space-x-1">
-                <ShieldCheck className="w-3 h-3 text-sky-300" />
-                <span>Supabase RBAC</span>
-              </span>
+          <div className="flex items-center space-x-3">
+            <StudyBuddyLogo size="sm" />
+            <div className="space-y-0.5">
+              <div className="flex items-center space-x-2">
+                <h3 className="font-extrabold text-base text-white tracking-tight">
+                  Study Buddy AI Authentication
+                </h3>
+                <span className="px-2 py-0.5 bg-sky-500/20 text-sky-200 border border-sky-400/30 text-[10px] rounded-full font-semibold flex items-center space-x-1">
+                  <ShieldCheck className="w-3 h-3 text-sky-300" />
+                  <span>Supabase RBAC</span>
+                </span>
+              </div>
+              <p className="text-xs text-sky-200/90">
+                {loginType === 'student'
+                  ? 'Sign in to access your learning materials, quizzes & study plans'
+                  : 'Restricted administrative authorization portal'}
+              </p>
             </div>
-            <p className="text-xs text-sky-200/90">
-              {loginType === 'student'
-                ? 'Sign in to access your learning materials, quizzes & study plans'
-                : 'Restricted administrative authorization portal'}
-            </p>
           </div>
           <button
             onClick={onClose}
@@ -808,42 +766,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   )}
                 </button>
               </form>
-
-              {/* Initial Super Administrator Activation Callout (Part 3) */}
-              <div className="p-3.5 bg-amber-50/80 border border-amber-200 rounded-2xl space-y-2 text-xs">
-                <div className="flex items-center justify-between">
-                  <span className="font-extrabold text-amber-950 flex items-center space-x-1.5">
-                    <Sparkles className="w-4 h-4 text-amber-600" />
-                    <span>Initial Super Administrator Setup</span>
-                  </span>
-                  <span className="px-2 py-0.5 bg-amber-200/60 text-amber-900 rounded-full font-bold text-[10px]">
-                    One-Time Provision
-                  </span>
-                </div>
-
-                <p className="text-[11px] text-amber-900 leading-snug">
-                  Initial administrator: <strong>Noel Historillo</strong> (<code className="font-mono text-[10px]">historillo.noel1994@gmail.com</code>).
-                </p>
-
-                <button
-                  type="button"
-                  onClick={handleBootstrapInitialAdmin}
-                  disabled={isBootstrappingInitial}
-                  className="w-full py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-bold rounded-xl transition-colors cursor-pointer flex items-center justify-center space-x-1.5 shadow-2xs"
-                >
-                  {isBootstrappingInitial ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>Activating Super Administrator...</span>
-                    </>
-                  ) : (
-                    <>
-                      <span>Activate Initial Super Administrator (Noel Historillo)</span>
-                      <ArrowRight className="w-3.5 h-3.5" />
-                    </>
-                  )}
-                </button>
-              </div>
             </div>
           )}
         </div>

@@ -192,11 +192,12 @@ CREATE POLICY "Users can insert own profile"
   ON public.profiles FOR INSERT
   WITH CHECK (auth.uid() = id);
 
--- Users can only update their own personal information
+-- Users can only update their own personal information (cannot self-modify account_status)
 DROP POLICY IF EXISTS "Users can update own profile" ON public.profiles;
 CREATE POLICY "Users can update own profile"
   ON public.profiles FOR UPDATE
-  USING (auth.uid() = id);
+  USING (auth.uid() = id)
+  WITH CHECK (auth.uid() = id);
 
 -- USER ROLES POLICIES
 -- Users can view their own role; admins can view all roles
@@ -205,11 +206,12 @@ CREATE POLICY "Users can view own role"
   ON public.user_roles FOR SELECT
   USING (auth.uid() = user_id OR public.is_admin(auth.uid()));
 
--- Only super admins can update or insert roles
+-- Only super admins can insert, update, or delete roles (prevents student self-escalation)
 DROP POLICY IF EXISTS "Super admins can manage roles" ON public.user_roles;
 CREATE POLICY "Super admins can manage roles"
   ON public.user_roles FOR ALL
-  USING (public.is_super_admin(auth.uid()));
+  USING (public.is_super_admin(auth.uid()))
+  WITH CHECK (public.is_super_admin(auth.uid()));
 
 -- AUDIT LOGS POLICIES
 -- Only admins can view audit logs; nobody can delete audit logs
@@ -225,6 +227,167 @@ CREATE POLICY "Admins can view invitations"
   ON public.admin_invitations FOR SELECT
   USING (public.is_admin(auth.uid()));
 
--- Initial Super Administrator bootstrap seed placeholder
--- Will be activated securely via the one-time backend bootstrap endpoint
+-- SYSTEM CONFIG POLICIES
+-- Only super admins can read or update system_config
+DROP POLICY IF EXISTS "Super admins can manage system config" ON public.system_config;
+CREATE POLICY "Super admins can manage system config"
+  ON public.system_config FOR ALL
+  USING (public.is_super_admin(auth.uid()))
+  WITH CHECK (public.is_super_admin(auth.uid()));
+
+-- ======================================================================
+-- 9. STUDENT DATA TABLES ROW LEVEL SECURITY (NON-DESTRUCTIVE / IDEMPOTENT)
+-- Protects existing learning_materials, quiz_attempts, ask_tutor_logs,
+-- study_progress, and study-buddy-materials storage objects so each
+-- authenticated student can only read/write their own records.
+-- ======================================================================
+
+-- LEARNING MATERIALS
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'learning_materials'
+  ) THEN
+    ALTER TABLE public.learning_materials ENABLE ROW LEVEL SECURITY;
+
+    DROP POLICY IF EXISTS "Students can read own learning materials" ON public.learning_materials;
+    CREATE POLICY "Students can read own learning materials"
+      ON public.learning_materials FOR SELECT
+      USING (auth.uid() = user_id);
+
+    DROP POLICY IF EXISTS "Students can insert own learning materials" ON public.learning_materials;
+    CREATE POLICY "Students can insert own learning materials"
+      ON public.learning_materials FOR INSERT
+      WITH CHECK (auth.uid() = user_id);
+
+    DROP POLICY IF EXISTS "Students can update own learning materials" ON public.learning_materials;
+    CREATE POLICY "Students can update own learning materials"
+      ON public.learning_materials FOR UPDATE
+      USING (auth.uid() = user_id)
+      WITH CHECK (auth.uid() = user_id);
+
+    DROP POLICY IF EXISTS "Students can delete own learning materials" ON public.learning_materials;
+    CREATE POLICY "Students can delete own learning materials"
+      ON public.learning_materials FOR DELETE
+      USING (auth.uid() = user_id);
+  END IF;
+END $$;
+
+-- QUIZ ATTEMPTS
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'quiz_attempts'
+  ) THEN
+    ALTER TABLE public.quiz_attempts ENABLE ROW LEVEL SECURITY;
+
+    DROP POLICY IF EXISTS "Students can read own quiz attempts" ON public.quiz_attempts;
+    CREATE POLICY "Students can read own quiz attempts"
+      ON public.quiz_attempts FOR SELECT
+      USING (auth.uid() = user_id);
+
+    DROP POLICY IF EXISTS "Students can insert own quiz attempts" ON public.quiz_attempts;
+    CREATE POLICY "Students can insert own quiz attempts"
+      ON public.quiz_attempts FOR INSERT
+      WITH CHECK (auth.uid() = user_id);
+  END IF;
+END $$;
+
+-- ASK TUTOR LOGS
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'ask_tutor_logs'
+  ) THEN
+    ALTER TABLE public.ask_tutor_logs ENABLE ROW LEVEL SECURITY;
+
+    DROP POLICY IF EXISTS "Students can read own tutor logs" ON public.ask_tutor_logs;
+    CREATE POLICY "Students can read own tutor logs"
+      ON public.ask_tutor_logs FOR SELECT
+      USING (auth.uid() = user_id);
+
+    DROP POLICY IF EXISTS "Students can insert own tutor logs" ON public.ask_tutor_logs;
+    CREATE POLICY "Students can insert own tutor logs"
+      ON public.ask_tutor_logs FOR INSERT
+      WITH CHECK (auth.uid() = user_id);
+  END IF;
+END $$;
+
+-- STUDY PROGRESS
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'study_progress'
+  ) THEN
+    ALTER TABLE public.study_progress ENABLE ROW LEVEL SECURITY;
+
+    DROP POLICY IF EXISTS "Students can read own study progress" ON public.study_progress;
+    CREATE POLICY "Students can read own study progress"
+      ON public.study_progress FOR SELECT
+      USING (auth.uid() = user_id);
+
+    DROP POLICY IF EXISTS "Students can insert own study progress" ON public.study_progress;
+    CREATE POLICY "Students can insert own study progress"
+      ON public.study_progress FOR INSERT
+      WITH CHECK (auth.uid() = user_id);
+
+    DROP POLICY IF EXISTS "Students can update own study progress" ON public.study_progress;
+    CREATE POLICY "Students can update own study progress"
+      ON public.study_progress FOR UPDATE
+      USING (auth.uid() = user_id)
+      WITH CHECK (auth.uid() = user_id);
+  END IF;
+END $$;
+
+-- STORAGE BUCKET POLICIES (study-buddy-materials)
+-- Each authenticated student can only access files under their own UID folder: <auth.uid()>/<filename>
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'storage' AND table_name = 'objects'
+  ) THEN
+    DROP POLICY IF EXISTS "Students can view own study material files" ON storage.objects;
+    CREATE POLICY "Students can view own study material files"
+      ON storage.objects FOR SELECT
+      TO authenticated
+      USING (
+        bucket_id = 'study-buddy-materials'
+        AND (storage.foldername(name))[1] = auth.uid()::text
+      );
+
+    DROP POLICY IF EXISTS "Students can upload own study material files" ON storage.objects;
+    CREATE POLICY "Students can upload own study material files"
+      ON storage.objects FOR INSERT
+      TO authenticated
+      WITH CHECK (
+        bucket_id = 'study-buddy-materials'
+        AND (storage.foldername(name))[1] = auth.uid()::text
+      );
+
+    DROP POLICY IF EXISTS "Students can update own study material files" ON storage.objects;
+    CREATE POLICY "Students can update own study material files"
+      ON storage.objects FOR UPDATE
+      TO authenticated
+      USING (
+        bucket_id = 'study-buddy-materials'
+        AND (storage.foldername(name))[1] = auth.uid()::text
+      );
+
+    DROP POLICY IF EXISTS "Students can delete own study material files" ON storage.objects;
+    CREATE POLICY "Students can delete own study material files"
+      ON storage.objects FOR DELETE
+      TO authenticated
+      USING (
+        bucket_id = 'study-buddy-materials'
+        AND (storage.foldername(name))[1] = auth.uid()::text
+      );
+  END IF;
+END $$;
+
 COMMENT ON TABLE public.user_roles IS 'Secure Role-Based Access Control: student, admin, super_admin';
+
