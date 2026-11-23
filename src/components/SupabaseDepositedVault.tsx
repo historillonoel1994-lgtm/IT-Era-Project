@@ -40,6 +40,7 @@ import {
   ensureUserProfileAndProgress,
   DATA_UPDATED_EVENT,
 } from '../lib/supabase';
+import { formatTimestamp12Hour, formatDateTime12Hour } from '../utils/timeFormat';
 
 interface SupabaseDepositedVaultProps {
   user: UserProfile;
@@ -47,6 +48,7 @@ interface SupabaseDepositedVaultProps {
   progress: StudentProgress;
   onOpenUpload: () => void;
   onSelectLesson: (lesson: LessonDocument) => void;
+  onLoadFullLesson?: (lesson: LessonDocument) => void;
   onTakeQuiz: () => void;
   onDataRefreshed?: () => void;
 }
@@ -76,6 +78,7 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
   progress: propProgress,
   onOpenUpload,
   onSelectLesson,
+  onLoadFullLesson,
   onTakeQuiz,
   onDataRefreshed,
 }) => {
@@ -96,6 +99,7 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
 
   // Friendly error notice
   const [dbErrorMessage, setDbErrorMessage] = useState<string | null>(null);
+  const [loadMaterialError, setLoadMaterialError] = useState<string | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
   const [showAllSamplesExpanded, setShowAllSamplesExpanded] = useState<boolean>(false);
   const [showAllQuizSamplesExpanded, setShowAllQuizSamplesExpanded] = useState<boolean>(false);
@@ -174,7 +178,9 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
         }
 
         if (duplicateMaterialIds.length > 0) {
-          void Promise.resolve(supabase.from('learning_materials').delete().in('id', duplicateMaterialIds)).catch(() => {});
+          void Promise.resolve(
+            supabase.from('learning_materials').delete().eq('user_id', userId).in('id', duplicateMaterialIds)
+          ).catch(() => {});
         }
 
         setDbMaterials(uniqueMaterials);
@@ -229,7 +235,9 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
         }
 
         if (duplicateQuizIds.length > 0) {
-          void Promise.resolve(supabase.from('quiz_attempts').delete().in('id', duplicateQuizIds)).catch(() => {});
+          void Promise.resolve(
+            supabase.from('quiz_attempts').delete().eq('user_id', userId).in('id', duplicateQuizIds)
+          ).catch(() => {});
         }
 
         fetchedQuizzes = uniqueQuizzes;
@@ -267,7 +275,7 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
             .filter((r: any) => r.id && r.id !== progRow.id)
             .map((r: any) => r.id);
           if (dupIds.length > 0) {
-            await supabase.from('study_progress').delete().in('id', dupIds);
+            await supabase.from('study_progress').delete().eq('user_id', userId).in('id', dupIds);
           }
         }
       }
@@ -315,13 +323,24 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
       setDbErrorMessage((prev) => prev || err.message);
     }
 
-    setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+    setLastSyncedTime(formatTimestamp12Hour(new Date(), { includeSeconds: true }));
     setSyncing(false);
 
     if (onDataRefreshed) {
       onDataRefreshed();
     }
   };
+
+  // Clear stale user-scoped lists immediately when switching user accounts
+  useEffect(() => {
+    setDbMaterials([]);
+    setDbQuizzes([]);
+    setDbStudyMinutes(0);
+    setDbTasksDone(0);
+    setDbVerifiedPages(0);
+    setDbAverageQuizScore(0);
+    setLoadMaterialError(null);
+  }, [user.id]);
 
   useEffect(() => {
     loadSupabaseData();
@@ -353,10 +372,19 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
 
   const [loadingMaterialId, setLoadingMaterialId] = useState<string | null>(null);
 
-  // Helper to load a material into the app with complete extracted content
+  // Helper to load a material into the app with complete extracted content and navigate straight to the lesson view
   const handleMaterialClick = async (mat: SupabaseMaterialRow) => {
     setCurrentLearningMaterialId(mat.id);
     setLoadingMaterialId(mat.id);
+    setLoadMaterialError(null);
+
+    const openLoadedLesson = (doc: LessonDocument) => {
+      if (onLoadFullLesson) {
+        onLoadFullLesson(doc);
+      } else {
+        onSelectLesson(doc);
+      }
+    };
 
     try {
       // 1. Look for matching lesson in current library with complete pages
@@ -364,7 +392,7 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
         (l) => l.id === mat.id || (l.fileName && mat.file_name && l.fileName === mat.file_name)
       );
       if (existing && !isPlaceholderContent(existing.pages)) {
-        onSelectLesson(existing);
+        openLoadedLesson(existing);
         setLoadingMaterialId(null);
         return;
       }
@@ -377,11 +405,14 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
         filePath: mat.file_path,
         totalPages: mat.total_pages || 1,
       });
-      onSelectLesson(reconstructed);
+      openLoadedLesson(reconstructed);
     } catch (err: any) {
       console.warn('Could not reconstruct material:', err.message);
+      setLoadMaterialError(
+        `Could not retrieve full extracted pages for "${mat.title || mat.file_name}". Opening lesson view so you can reprocess it.`
+      );
       const ext = (mat.file_name?.split('.').pop() || 'pdf').toLowerCase();
-      onSelectLesson({
+      openLoadedLesson({
         id: mat.id,
         title: mat.title || mat.file_name || 'Learning Material',
         subject: 'Saved Course Material',
@@ -729,7 +760,7 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
                 {DEFAULT_LESSONS.slice(0, 4).map((sample, idx) => (
                   <div
                     key={sample.id}
-                    onClick={() => onSelectLesson(sample)}
+                    onClick={() => (onLoadFullLesson ? onLoadFullLesson(sample) : onSelectLesson(sample))}
                     className="p-4 bg-slate-50 hover:bg-sky-50/70 border border-slate-200 hover:border-sky-300 rounded-2xl transition-all cursor-pointer space-y-2"
                   >
                     <div className="flex items-start justify-between">
@@ -774,6 +805,21 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
             </div>
           ) : (
             <div className="space-y-3">
+              {loadMaterialError && (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 flex items-center justify-between gap-2">
+                  <div className="flex items-center space-x-2">
+                    <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>{loadMaterialError}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setLoadMaterialError(null)}
+                    className="text-amber-700 hover:text-amber-900 font-bold shrink-0 cursor-pointer"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 {(showAllMaterialsList ? dbMaterials : dbMaterials.slice(0, 4)).map((mat) => {
                   const ext = (mat.file_name?.split('.').pop() || 'pdf').toLowerCase();
@@ -1055,9 +1101,7 @@ export const SupabaseDepositedVault: React.FC<SupabaseDepositedVaultProps> = ({
                           </td>
                           <td className="px-4 py-3 text-slate-500">
                             {q.created_at
-                              ? new Date(q.created_at).toLocaleDateString() +
-                                ' ' +
-                                new Date(q.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                              ? formatDateTime12Hour(q.created_at)
                               : 'Saved in database'}
                           </td>
                           <td className="px-4 py-3 text-right">

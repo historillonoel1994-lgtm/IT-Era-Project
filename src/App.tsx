@@ -68,6 +68,9 @@ export default function App() {
   const [progress, setProgress] = useState<StudentProgress>(getStudentProgress());
   const [isUserLoggedIn, setIsUserLoggedIn] = useState<boolean>(isLoggedIn());
   const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
+  const [lessonFocusTrigger, setLessonFocusTrigger] = useState<number>(0);
+  const [quizSubTab, setQuizSubTab] = useState<'practice_exam' | 'flashcards' | 'contrasts' | 'memorization'>('practice_exam');
+  const [quizSubTabTrigger, setQuizSubTabTrigger] = useState<number>(0);
 
   // Modals & Tutorial
   const [isUploadOpen, setIsUploadOpen] = useState(false);
@@ -109,55 +112,60 @@ export default function App() {
 
     // If Supabase is configured, check session and sync user records
     if (checkIsConfigured()) {
-      const syncAuthenticatedSession = async (sessionUser: any) => {
-        // Exit Demo Mode cleanly whenever a real authenticated session begins
-        setDemoModeActive(false);
-        setApiDemoMode(false);
-        setIsDemoMode(false);
+      let activeSyncUserId: string | null = null;
+      let lastSyncedUserId: string | null = null;
+      let lastSyncedAt = 0;
 
-        resetUserScopedLocalData(sessionUser.id);
-        setIsUserLoggedIn(true);
-        setLoggedIn(true);
-        let populatedProfile = await ensureUserProfileAndProgress(sessionUser);
-        if (sessionUser.email) {
-          try {
-            const roleRes = await verifyUserRoleWithServer({
-              email: sessionUser.email,
-              userId: sessionUser.id,
-              fullName: populatedProfile?.fullName,
-            });
-            if (roleRes?.role && populatedProfile) {
-              populatedProfile = { ...populatedProfile, role: roleRes.role };
-            }
-          } catch (e) {
-            console.warn('Role verification notice:', e);
+      const syncAuthenticatedSession = async (sessionUser: any, force = false) => {
+        if (!sessionUser?.id) return;
+        const now = Date.now();
+        if (activeSyncUserId === sessionUser.id) return;
+        if (!force && lastSyncedUserId === sessionUser.id && now - lastSyncedAt < 4000) return;
+
+        activeSyncUserId = sessionUser.id;
+        try {
+          // Exit Demo Mode cleanly whenever a real authenticated session begins
+          setDemoModeActive(false);
+          setApiDemoMode(false);
+          setIsDemoMode(false);
+
+          resetUserScopedLocalData(sessionUser.id);
+          setIsUserLoggedIn(true);
+          setLoggedIn(true);
+          const populatedProfile = await ensureUserProfileAndProgress(sessionUser);
+          if (populatedProfile) {
+            setUser(populatedProfile);
+            saveUserProfile(populatedProfile);
           }
-        }
-        if (populatedProfile) {
-          setUser(populatedProfile);
-          saveUserProfile(populatedProfile);
-        }
-        await syncUserDataFromSupabase(sessionUser.id);
-        const syncedLessons = getStoredLessons();
-        setLessons(syncedLessons);
-        const currentActive = getActiveLesson();
-        setActiveLesson(currentActive);
-        setProgress(getStudentProgress());
-        setUser(getUserProfile());
+          await syncUserDataFromSupabase(sessionUser.id);
+          const syncedLessons = getStoredLessons();
+          setLessons(syncedLessons);
+          const currentActive = getActiveLesson();
+          setActiveLesson(currentActive);
+          setProgress(getStudentProgress());
+          setUser(getUserProfile());
 
-        if (isPlaceholderContent(currentActive.pages) || currentActive.processingStatus !== 'ready') {
-          loadAndReconstructLesson(currentActive.id)
-            .then((full) => {
-              setActiveLesson(full);
-              setLessons(getStoredLessons());
-            })
-            .catch(() => {});
+          if (isPlaceholderContent(currentActive.pages) || currentActive.processingStatus !== 'ready') {
+            loadAndReconstructLesson(currentActive.id)
+              .then((full) => {
+                setActiveLesson(full);
+                setLessons(getStoredLessons());
+              })
+              .catch(() => {});
+          }
+
+          lastSyncedUserId = sessionUser.id;
+          lastSyncedAt = Date.now();
+        } finally {
+          if (activeSyncUserId === sessionUser.id) {
+            activeSyncUserId = null;
+          }
         }
       };
 
       supabase.auth.getSession().then(async ({ data: { session } }) => {
         if (session?.user) {
-          await syncAuthenticatedSession(session.user);
+          await syncAuthenticatedSession(session.user, true);
         } else {
           // Ensure stale cached local login flag cannot masquerade as an active admin session
           const storedProfile = getUserProfile();
@@ -173,9 +181,11 @@ export default function App() {
 
       const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (session?.user) {
-          await syncAuthenticatedSession(session.user);
+          await syncAuthenticatedSession(session.user, event === 'SIGNED_IN');
         } else {
           if (event === 'SIGNED_OUT') {
+            lastSyncedUserId = null;
+            lastSyncedAt = 0;
             clearAdminMfaToken();
             resetUserScopedLocalData();
             setLoggedIn(false);
@@ -325,6 +335,58 @@ export default function App() {
     }
   };
 
+  const handleLoadFullLesson = (lesson: LessonDocument) => {
+    handleSelectLesson(lesson);
+    setCurrentTab('summarize');
+    setLessonFocusTrigger((prev) => prev + 1);
+  };
+
+  const scrollToFeatureSection = () => {
+    window.setTimeout(() => {
+      const target = document.getElementById('feature-tabs-section');
+      if (!target) return;
+      const prefersReducedMotion =
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      target.scrollIntoView({
+        behavior: prefersReducedMotion ? 'auto' : 'smooth',
+        block: 'start',
+      });
+    }, 50);
+  };
+
+  const handleMobileNavigate = (
+    tab: NavTab,
+    options?: {
+      scrollToContent?: boolean;
+      quizSubTab?: 'practice_exam' | 'flashcards' | 'contrasts' | 'memorization';
+    }
+  ) => {
+    setCurrentTab(tab);
+    if (tab === 'quiz' && options?.quizSubTab) {
+      setQuizSubTab(options.quizSubTab);
+      setQuizSubTabTrigger((prev) => prev + 1);
+    }
+    if (options?.scrollToContent) {
+      if (tab === 'summarize') {
+        setLessonFocusTrigger((prev) => prev + 1);
+      } else {
+        scrollToFeatureSection();
+      }
+    }
+  };
+
+  const handleGoHome = () => {
+    setCurrentTab('summarize');
+    const prefersReducedMotion =
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    window.scrollTo({
+      top: 0,
+      behavior: prefersReducedMotion ? 'auto' : 'smooth',
+    });
+  };
+
   const canRenderAdminDashboard =
     isAdminDashboardOpen &&
     isUserLoggedIn &&
@@ -332,11 +394,14 @@ export default function App() {
     (user.role === 'admin' || user.role === 'super_admin');
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-800 selection:bg-sky-200">
-      {/* Navbar with official logo, tab switching, Help & Tutorial, and profile/login controls */}
+    <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-800 selection:bg-sky-200 overflow-x-hidden">
+      {/* Navbar with official logo, desktop tabs, compact 3x2 mobile grid, Help & Tutorial, and profile/login controls */}
       <Navbar
         currentTab={currentTab}
         onTabChange={setCurrentTab}
+        onMobileNavigate={handleMobileNavigate}
+        onGoHome={handleGoHome}
+        activeQuizSubTab={quizSubTab}
         activeLesson={activeLesson}
         lessons={lessons}
         onSelectLesson={handleSelectLesson}
@@ -687,6 +752,7 @@ export default function App() {
               progress={progress}
               onOpenUpload={() => setIsUploadOpen(true)}
               onSelectLesson={handleSelectLesson}
+              onLoadFullLesson={handleLoadFullLesson}
               onTakeQuiz={() => setCurrentTab('quiz')}
               onDataRefreshed={() => {
                 setLessons(getStoredLessons());
@@ -700,7 +766,7 @@ export default function App() {
         <ResponsibleAiBanner />
 
         {/* Feature Tabs Content Anchor */}
-        <div id="feature-tabs-section">
+        <div id="feature-tabs-section" className="scroll-mt-24">
           {/* Active Tab View */}
           {currentTab === 'summarize' && (
             <SummarizeLessonView
@@ -708,6 +774,7 @@ export default function App() {
               onOpenUpload={() => setIsUploadOpen(true)}
               onNavigateToQuiz={() => setCurrentTab('quiz')}
               onNavigateToTutor={() => setCurrentTab('tutor')}
+              scrollTrigger={lessonFocusTrigger}
             />
           )}
 
@@ -719,6 +786,8 @@ export default function App() {
               onOpenUpload={() => setIsUploadOpen(true)}
               onNavigateToSummary={() => setCurrentTab('summarize')}
               onNavigateToProgress={() => setCurrentTab('progress')}
+              initialSubTab={quizSubTab}
+              subTabTrigger={quizSubTabTrigger}
             />
           )}
 

@@ -20,6 +20,7 @@ import {
   extractBearerTokenFromHeaders,
   verifySupabaseAccessToken as sharedVerifySupabaseAccessToken,
 } from './lib/authVerifier';
+import { gradeQuizAnswer, buildAcceptedAnswers } from './lib/quizGrader';
 
 dotenv.config();
 
@@ -143,6 +144,8 @@ function parseOptionalMultipartUpload(req: Request, res: Response, next: express
 
 interface StoredDocRecord {
   id: string;
+  ownerUserId?: string;
+  isPublic?: boolean;
   title: string;
   filename: string;
   filePath?: string;
@@ -155,6 +158,21 @@ interface StoredDocRecord {
   fullTextLength: number;
   uploadedAt: string;
   updatedAt: string;
+}
+
+class DocumentOwnershipError extends Error {
+  statusCode = 403;
+  constructor(message = 'Access denied: you do not have permission to access or modify this study material.') {
+    super(message);
+    this.name = 'DocumentOwnershipError';
+  }
+}
+
+function isSafeOwnedStoragePath(filePath: string, ownerUserId: string): boolean {
+  if (!filePath || !ownerUserId) return false;
+  const normalized = filePath.replace(/\\/g, '/').replace(/^\/+/, '');
+  if (normalized.includes('..') || normalized.includes('\0')) return false;
+  return normalized.startsWith(`${ownerUserId}/`);
 }
 
 function loadDocumentsStore(): Record<string, StoredDocRecord> {
@@ -183,34 +201,52 @@ function saveDocumentsStore(store: Record<string, StoredDocRecord>): void {
   }
 }
 
-function saveDocumentToStore(doc: Partial<StoredDocRecord> & { id: string }): StoredDocRecord {
+function saveDocumentToStore(
+  doc: Partial<StoredDocRecord> & { id: string },
+  ownerUserId?: string
+): StoredDocRecord {
   const store = loadDocumentsStore();
-  const existing = store[doc.id] || {};
-  const resolvedPages = doc.pages || existing.pages || [];
+  const existing = store[doc.id];
+  const resolvedOwner = (ownerUserId || doc.ownerUserId || '').trim();
+
+  if (existing && !existing.isPublic) {
+    if (!resolvedOwner || (existing.ownerUserId && existing.ownerUserId !== resolvedOwner)) {
+      throw new DocumentOwnershipError();
+    }
+  }
+
+  const baseExisting = existing && (!existing.ownerUserId || existing.ownerUserId === resolvedOwner) ? existing : ({} as Partial<StoredDocRecord>);
+  const resolvedPages = doc.pages || baseExisting.pages || [];
   const record: StoredDocRecord = {
     id: doc.id,
-    title: doc.title || existing.title || doc.filename || 'Untitled Material',
-    filename: doc.filename || existing.filename || 'document',
-    filePath: doc.filePath || existing.filePath,
-    fileType: doc.fileType || existing.fileType || 'pdf',
-    totalPages: doc.totalPages || resolvedPages.length || existing.totalPages || 1,
+    ownerUserId: resolvedOwner || baseExisting.ownerUserId,
+    isPublic: doc.isPublic === true ? true : Boolean(baseExisting.isPublic),
+    title: doc.title || baseExisting.title || doc.filename || 'Untitled Material',
+    filename: doc.filename || baseExisting.filename || 'document',
+    filePath: doc.filePath || baseExisting.filePath,
+    fileType: doc.fileType || baseExisting.fileType || 'pdf',
+    totalPages: doc.totalPages || resolvedPages.length || baseExisting.totalPages || 1,
     pages: resolvedPages,
-    chunks: doc.chunks || existing.chunks || [],
+    chunks: doc.chunks || baseExisting.chunks || [],
     processingStatus: doc.processingStatus || (isPlaceholderContent(resolvedPages) ? 'reprocessing_required' : 'ready'),
     statusMessage: doc.statusMessage || 'Document is ready for study and analysis.',
     fullTextLength: doc.fullTextLength || resolvedPages.reduce((acc, p) => acc + (p.text?.length || 0), 0),
-    uploadedAt: existing.uploadedAt || new Date().toISOString(),
+    uploadedAt: baseExisting.uploadedAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+
   store[doc.id] = record;
-  if (record.filename) {
-    const fileKey = `file:${record.filename.toLowerCase()}`;
+
+  // Scope secondary lookup indexes strictly per owner so different students never collide on filenames or paths
+  const ownerPrefix = record.ownerUserId ? `owner:${record.ownerUserId}:` : record.isPublic ? 'public:' : null;
+  if (ownerPrefix && record.filename) {
+    const fileKey = `${ownerPrefix}file:${record.filename.toLowerCase()}`;
     if (!isPlaceholderContent(record.pages) || !store[fileKey] || isPlaceholderContent(store[fileKey].pages)) {
       store[fileKey] = record;
     }
   }
-  if (record.filePath) {
-    const pathKey = `path:${record.filePath}`;
+  if (ownerPrefix && record.filePath) {
+    const pathKey = `${ownerPrefix}path:${record.filePath}`;
     if (!isPlaceholderContent(record.pages) || !store[pathKey] || isPlaceholderContent(store[pathKey].pages)) {
       store[pathKey] = record;
     }
@@ -238,30 +274,56 @@ function isPlaceholderContent(pages?: { text?: string }[]): boolean {
   return false;
 }
 
-function getDocumentFromStore(key: string): StoredDocRecord | null {
-  if (!key) return null;
+function canUserAccessDocument(record: StoredDocRecord | undefined | null, callerUserId?: string | null): boolean {
+  if (!record) return false;
+  if (record.isPublic === true) return true;
+  if (!callerUserId || !record.ownerUserId) return false;
+  return record.ownerUserId === callerUserId;
+}
+
+function checkDocumentAccess(
+  key: string,
+  callerUserId?: string | null
+): { status: 'ok'; doc: StoredDocRecord } | { status: 'forbidden' } | { status: 'not_found' } {
+  if (!key) return { status: 'not_found' };
   const store = loadDocumentsStore();
   const cleanKey = String(key).trim();
-  if (!cleanKey) return null;
+  if (!cleanKey) return { status: 'not_found' };
   const cleanKeyLow = cleanKey.toLowerCase();
   const strippedKey = cleanKeyLow.replace(/\.[a-z0-9]+$/i, '');
 
-  if (store[cleanKey]) return store[cleanKey];
-  if (store[`path:${cleanKey}`]) return store[`path:${cleanKey}`];
-  if (store[`file:${cleanKeyLow}`]) return store[`file:${cleanKeyLow}`];
+  // 1. Direct primary ID lookup: explicitly detect cross-user access attempts
+  const directById = store[cleanKey];
+  if (directById) {
+    if (canUserAccessDocument(directById, callerUserId)) {
+      return { status: 'ok', doc: directById };
+    }
+    return { status: 'forbidden' };
+  }
 
-  const values = Object.values(store);
+  // 2. Owner-scoped direct index lookups
+  if (callerUserId) {
+    const byOwnerPath = store[`owner:${callerUserId}:path:${cleanKey}`];
+    if (byOwnerPath && canUserAccessDocument(byOwnerPath, callerUserId)) {
+      return { status: 'ok', doc: byOwnerPath };
+    }
+    const byOwnerFile = store[`owner:${callerUserId}:file:${cleanKeyLow}`];
+    if (byOwnerFile && canUserAccessDocument(byOwnerFile, callerUserId)) {
+      return { status: 'ok', doc: byOwnerFile };
+    }
+  }
 
-  // Exact ID / filePath / filename / title matches (ID & filePath first)
+  // 3. Scan ONLY records owned by the caller (or explicitly public)
+  const accessibleValues = Object.values(store).filter((d) => canUserAccessDocument(d, callerUserId));
+
   let match =
-    values.find((d) => d.id === cleanKey) ||
-    values.find((d) => d.filePath && d.filePath === cleanKey) ||
-    values.find((d) => d.filename && d.filename.toLowerCase() === cleanKeyLow) ||
-    values.find((d) => d.title && d.title.toLowerCase() === cleanKeyLow);
+    accessibleValues.find((d) => d.id === cleanKey) ||
+    accessibleValues.find((d) => d.filePath && d.filePath === cleanKey) ||
+    accessibleValues.find((d) => d.filename && d.filename.toLowerCase() === cleanKeyLow) ||
+    accessibleValues.find((d) => d.title && d.title.toLowerCase() === cleanKeyLow);
 
-  // Extension-stripped filename or safe partial match (only for meaningful lengths >= 4)
   if (!match && strippedKey.length >= 4) {
-    match = values.find((d) => {
+    match = accessibleValues.find((d) => {
       const fNameLow = (d.filename || '').toLowerCase();
       const fStripped = fNameLow.replace(/\.[a-z0-9]+$/i, '');
       const tLow = (d.title || '').toLowerCase();
@@ -273,7 +335,24 @@ function getDocumentFromStore(key: string): StoredDocRecord | null {
     });
   }
 
-  return match || null;
+  if (match) {
+    return { status: 'ok', doc: match };
+  }
+
+  // 4. Detect if key directly targets another student's private record by id or filePath
+  const otherOwnedMatch = Object.values(store).find(
+    (d) => !canUserAccessDocument(d, callerUserId) && (d.id === cleanKey || (d.filePath && d.filePath === cleanKey))
+  );
+  if (otherOwnedMatch) {
+    return { status: 'forbidden' };
+  }
+
+  return { status: 'not_found' };
+}
+
+function getDocumentFromStore(key: string, callerUserId?: string | null): StoredDocRecord | null {
+  const result = checkDocumentAccess(key, callerUserId);
+  return result.status === 'ok' ? result.doc : null;
 }
 
 const app = express();
@@ -285,7 +364,11 @@ app.set('trust proxy', 1);
 app.use((req: Request, res: Response, next: express.NextFunction) => {
   const origin = req.headers.origin;
   if (origin) {
-    const allowedOrigin = getAllowedCorsOrigin(origin);
+    const requestHost =
+      (typeof req.headers['x-forwarded-host'] === 'string' ? req.headers['x-forwarded-host'] : '') ||
+      req.headers.host ||
+      '';
+    const allowedOrigin = getAllowedCorsOrigin(origin, requestHost);
     if (allowedOrigin) {
       res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
       res.setHeader('Vary', 'Origin');
@@ -899,41 +982,57 @@ async function extractDocumentPagesFromBuffer(
   return { finalPages, detectedType };
 }
 
-// Helper to verify caller authentication on document processing routes when Supabase Auth is configured
-async function verifyDocumentRequestAuth(req: Request): Promise<{ ok: boolean; status?: number; error?: string }> {
-  const supabaseConfiguredOnServer = Boolean(
-    (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim() &&
-      (
-        process.env.SUPABASE_ANON_KEY ||
-        process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
-        process.env.VITE_SUPABASE_ANON_KEY ||
-        ''
-      ).trim()
-  );
-
+// Resolve authenticated caller identity strictly from verified Bearer JWT (never trust client-supplied userId)
+async function resolveCallerIdentity(req: Request): Promise<{
+  authenticated: boolean;
+  userId?: string;
+  email?: string;
+  status?: number;
+  error?: string;
+}> {
   const token = extractBearerTokenFromHeaders(req.headers as Record<string, string | string[] | undefined>);
-  if (token) {
-    const verified = await sharedVerifySupabaseAccessToken(token);
-    if (!verified.valid) {
-      return {
-        ok: false,
-        status: 401,
-        error: verified.reason || 'Authentication session is invalid or expired. Please sign in again.',
-      };
-    }
-    return { ok: true };
-  }
-
-  // When running with server-side Supabase Auth configured (e.g. Render production), require an authenticated user
-  if (supabaseConfiguredOnServer) {
+  if (!token) {
     return {
-      ok: false,
+      authenticated: false,
       status: 401,
-      error: 'Authentication required to process uploaded files. Please sign in to your Study Buddy AI account.',
+      error: 'Authentication required. Please sign in to access your study materials.',
     };
   }
+  const verified = await sharedVerifySupabaseAccessToken(token);
+  if (!verified.valid || !verified.userId) {
+    return {
+      authenticated: false,
+      status: 401,
+      error: verified.reason || 'Authentication session is invalid or expired. Please sign in again.',
+    };
+  }
+  return {
+    authenticated: true,
+    userId: verified.userId,
+    email: verified.email,
+  };
+}
 
-  return { ok: true };
+// Helper to verify caller authentication on document storage & processing routes (always requires valid authenticated student JWT)
+async function verifyDocumentRequestAuth(
+  req: Request
+): Promise<{ ok: boolean; userId?: string; email?: string; status?: number; error?: string }> {
+  if (req.headers['x-demo-mode'] === 'true') {
+    return {
+      ok: false,
+      status: 403,
+      error: 'Demo Mode is read-only. Sign in with a student account to upload or access private study materials.',
+    };
+  }
+  const identity = await resolveCallerIdentity(req);
+  if (!identity.authenticated || !identity.userId) {
+    return {
+      ok: false,
+      status: identity.status || 401,
+      error: identity.error || 'Authentication required. Please sign in to your Study Buddy AI account.',
+    };
+  }
+  return { ok: true, userId: identity.userId, email: identity.email };
 }
 
 // Fetch persisted original file from external Supabase Storage ("study-buddy-materials") using caller's Bearer JWT (honors RLS)
@@ -986,8 +1085,16 @@ app.post(
 
     try {
       const authCheck = await verifyDocumentRequestAuth(req);
-      if (!authCheck.ok) {
+      if (!authCheck.ok || !authCheck.userId) {
         return res.status(authCheck.status || 401).json({ error: authCheck.error });
+      }
+      const ownerUserId = authCheck.userId;
+
+      const requestedFilePath = typeof req.body?.filePath === 'string' ? req.body.filePath.trim() : undefined;
+      if (requestedFilePath && !isSafeOwnedStoragePath(requestedFilePath, ownerUserId)) {
+        return res.status(403).json({
+          error: 'Access denied: file path does not belong to the authenticated student account.',
+        });
       }
 
       let dataBuffer: Buffer;
@@ -1022,7 +1129,7 @@ app.post(
       const fullTextLength = finalPages.reduce((sum, p) => sum + p.text.length, 0);
 
       if (hasReadableText) {
-        parsedDocumentCache.set(safeFilename, {
+        parsedDocumentCache.set(`${ownerUserId}::${safeFilename}`, {
           filename: safeFilename,
           fileType: detectedType,
           totalPages: finalPages.length,
@@ -1033,22 +1140,26 @@ app.post(
         });
       }
 
-      const docId = (req.body?.documentId as string) || (req.body?.id as string) || `doc-${Date.now()}`;
-      const storedRecord = saveDocumentToStore({
-        id: docId,
-        title: (req.body?.title as string) || (req.body?.lessonTitle as string) || safeFilename,
-        filename: safeFilename,
-        filePath: req.body?.filePath as string,
-        fileType: detectedType,
-        totalPages: finalPages.length,
-        pages: finalPages,
-        chunks,
-        processingStatus: statusValue,
-        statusMessage: hasReadableText
-          ? 'Document extracted and ready for study.'
-          : 'No readable text could be extracted from this file. It may be a scanned image without selectable text.',
-        fullTextLength,
-      });
+      const docId = (req.body?.documentId as string) || (req.body?.id as string) || `doc-${ownerUserId.slice(0, 8)}-${Date.now()}`;
+      const storedRecord = saveDocumentToStore(
+        {
+          id: docId,
+          ownerUserId,
+          title: (req.body?.title as string) || (req.body?.lessonTitle as string) || safeFilename,
+          filename: safeFilename,
+          filePath: requestedFilePath,
+          fileType: detectedType,
+          totalPages: finalPages.length,
+          pages: finalPages,
+          chunks,
+          processingStatus: statusValue,
+          statusMessage: hasReadableText
+            ? 'Document extracted and ready for study.'
+            : 'No readable text could be extracted from this file. It may be a scanned image without selectable text.',
+          fullTextLength,
+        },
+        ownerUserId
+      );
 
       if (!hasReadableText) {
         return res.status(422).json({
@@ -1069,6 +1180,9 @@ app.post(
         processingStatus: 'ready',
       });
     } catch (error: any) {
+      if (error instanceof DocumentOwnershipError) {
+        return res.status(403).json({ error: error.message });
+      }
       if (error instanceof DocumentExtractionError) {
         return res.status(error.statusCode).json({
           error: error.message,
@@ -1086,35 +1200,68 @@ app.post(
   }
 );
 
-// Endpoint: Store or update complete extracted document content
-app.post('/api/documents/store', (req: Request, res: Response) => {
-  const { id, documentId, title, filename, filePath, fileType, totalPages, pages, chunks, processingStatus, statusMessage } = req.body;
+// Endpoint: Store or update complete extracted document content (strictly scoped to authenticated owner)
+app.post('/api/documents/store', async (req: Request, res: Response) => {
+  const authCheck = await verifyDocumentRequestAuth(req);
+  if (!authCheck.ok || !authCheck.userId) {
+    return res.status(authCheck.status || 401).json({ error: authCheck.error });
+  }
+  const ownerUserId = authCheck.userId;
+
+  const { id, documentId, title, filename, filePath, fileType, totalPages, pages, chunks, processingStatus, statusMessage } = req.body || {};
   const targetId = id || documentId;
   if (!targetId) {
     return res.status(400).json({ error: 'Document ID is required.' });
   }
 
-  const record = saveDocumentToStore({
-    id: targetId,
-    title,
-    filename,
-    filePath,
-    fileType,
-    totalPages,
-    pages,
-    chunks,
-    processingStatus: processingStatus || 'ready',
-    statusMessage,
-  });
+  const normalizedFilePath = typeof filePath === 'string' && filePath.trim() ? filePath.trim() : undefined;
+  if (normalizedFilePath && !isSafeOwnedStoragePath(normalizedFilePath, ownerUserId)) {
+    return res.status(403).json({
+      error: 'Access denied: file path does not belong to the authenticated student account.',
+    });
+  }
 
-  return res.json({ success: true, document: record });
+  try {
+    const record = saveDocumentToStore(
+      {
+        id: targetId,
+        ownerUserId,
+        title,
+        filename,
+        filePath: normalizedFilePath,
+        fileType,
+        totalPages,
+        pages,
+        chunks,
+        processingStatus: processingStatus || 'ready',
+        statusMessage,
+      },
+      ownerUserId
+    );
+    return res.json({ success: true, document: record });
+  } catch (err: any) {
+    if (err instanceof DocumentOwnershipError) {
+      return res.status(403).json({ error: err.message });
+    }
+    return res.status(500).json({ error: err?.message || 'Failed to store document.' });
+  }
 });
 
-// Endpoint: Retrieve complete extracted document content by ID, filename, or storage path
-app.get('/api/documents/:id', (req: Request, res: Response) => {
+// Endpoint: Retrieve complete extracted document content by ID, filename, or storage path (strictly owner-verified)
+app.get('/api/documents/:id', async (req: Request, res: Response) => {
+  const authCheck = await verifyDocumentRequestAuth(req);
+  if (!authCheck.ok || !authCheck.userId) {
+    return res.status(authCheck.status || 401).json({ error: authCheck.error });
+  }
+
   const { id } = req.params;
-  const doc = getDocumentFromStore(id);
-  if (!doc || isPlaceholderContent(doc.pages)) {
+  const access = checkDocumentAccess(id, authCheck.userId);
+  if (access.status === 'forbidden') {
+    return res.status(403).json({
+      error: 'Access denied: this learning material belongs to another student account.',
+    });
+  }
+  if (access.status === 'not_found' || isPlaceholderContent(access.doc.pages)) {
     return res.status(404).json({
       error: 'Document complete content not found on server.',
       processingStatus: 'reprocessing_required',
@@ -1125,7 +1272,7 @@ app.get('/api/documents/:id', (req: Request, res: Response) => {
   return res.json({
     success: true,
     document: {
-      ...doc,
+      ...access.doc,
       processingStatus: 'ready',
     },
   });
@@ -1142,8 +1289,23 @@ app.post(
 
     try {
       const authCheck = await verifyDocumentRequestAuth(req);
-      if (!authCheck.ok) {
+      if (!authCheck.ok || !authCheck.userId) {
         return res.status(authCheck.status || 401).json({ error: authCheck.error });
+      }
+      const ownerUserId = authCheck.userId;
+
+      const accessCheck = checkDocumentAccess(id, ownerUserId);
+      if (accessCheck.status === 'forbidden') {
+        return res.status(403).json({
+          error: 'Access denied: you do not have permission to reprocess this learning material.',
+        });
+      }
+
+      const normalizedFilePath = typeof filePath === 'string' && filePath.trim() ? filePath.trim() : undefined;
+      if (normalizedFilePath && !isSafeOwnedStoragePath(normalizedFilePath, ownerUserId)) {
+        return res.status(403).json({
+          error: 'Access denied: storage path does not belong to the authenticated student account.',
+        });
       }
 
       let dataBuffer: Buffer | null = null;
@@ -1154,12 +1316,12 @@ app.post(
       } else if (fileBase64 && typeof fileBase64 === 'string') {
         const cleanBase64 = fileBase64.replace(/^data:[^;]+;base64,/, '');
         dataBuffer = Buffer.from(cleanBase64, 'base64');
-      } else if (filePath && typeof filePath === 'string') {
+      } else if (normalizedFilePath) {
         const bearerToken = extractBearerTokenFromHeaders(
           req.headers as Record<string, string | string[] | undefined>
         );
         if (bearerToken) {
-          dataBuffer = await fetchOriginalFromSupabaseStorage(filePath, bearerToken);
+          dataBuffer = await fetchOriginalFromSupabaseStorage(normalizedFilePath, bearerToken);
         }
       }
 
@@ -1167,18 +1329,22 @@ app.post(
         const { finalPages, detectedType } = await extractDocumentPagesFromBuffer(dataBuffer, safeFilename);
         if (finalPages.length > 0 && !isPlaceholderContent(finalPages)) {
           const chunks = buildDocumentChunks(finalPages);
-          const record = saveDocumentToStore({
-            id,
-            title: title || safeFilename,
-            filename: safeFilename,
-            filePath,
-            fileType: detectedType,
-            totalPages: finalPages.length,
-            pages: finalPages,
-            chunks,
-            processingStatus: 'ready',
-            statusMessage: 'Document reprocessed successfully.',
-          });
+          const record = saveDocumentToStore(
+            {
+              id,
+              ownerUserId,
+              title: title || safeFilename,
+              filename: safeFilename,
+              filePath: normalizedFilePath,
+              fileType: detectedType,
+              totalPages: finalPages.length,
+              pages: finalPages,
+              chunks,
+              processingStatus: 'ready',
+              statusMessage: 'Document reprocessed successfully.',
+            },
+            ownerUserId
+          );
 
           return res.json({ success: true, document: record, message: 'Document reprocessed successfully.' });
         }
@@ -1188,15 +1354,21 @@ app.post(
         });
       }
 
-      // Check if we already have valid extracted content in the cache store
-      const existing = getDocumentFromStore(id) || (filename ? getDocumentFromStore(filename) : null);
+      // Check if we already have valid extracted content owned by this student in the cache store
+      const existing =
+        (accessCheck.status === 'ok' ? accessCheck.doc : null) ||
+        (filename ? getDocumentFromStore(filename, ownerUserId) : null);
       if (existing && !isPlaceholderContent(existing.pages)) {
-        const updated = saveDocumentToStore({
-          ...existing,
-          id,
-          processingStatus: 'ready',
-          statusMessage: 'Document content verified and ready.',
-        });
+        const updated = saveDocumentToStore(
+          {
+            ...existing,
+            id,
+            ownerUserId,
+            processingStatus: 'ready',
+            statusMessage: 'Document content verified and ready.',
+          },
+          ownerUserId
+        );
         return res.json({ success: true, document: updated, message: 'Document content verified and ready.' });
       }
 
@@ -1206,6 +1378,9 @@ app.post(
         message: 'This learning material needs to be processed again to access its complete content.',
       });
     } catch (err: any) {
+      if (err instanceof DocumentOwnershipError) {
+        return res.status(403).json({ error: err.message });
+      }
       if (err instanceof DocumentExtractionError) {
         return res.status(err.statusCode).json({
           error: err.message,
@@ -1596,14 +1771,20 @@ function extractQuizQuestionsFromPages(
 app.post('/api/summarize', async (req: Request, res: Response) => {
   let { pages, lessonTitle, subject, id, documentId, lessonId, filename } = req.body;
   try {
-    // If pages are missing or placeholder, attempt automatic reconstruction from server store
+    // If pages are missing or placeholder, attempt owner-scoped reconstruction from server store
     if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
       const lookupKey = id || documentId || lessonId || filename || lessonTitle;
       if (lookupKey) {
-        const stored = getDocumentFromStore(lookupKey);
-        if (stored && stored.pages && !isPlaceholderContent(stored.pages)) {
-          pages = stored.pages;
-          if (!lessonTitle) lessonTitle = stored.title;
+        const caller = await resolveCallerIdentity(req);
+        const access = checkDocumentAccess(lookupKey, caller.userId);
+        if (access.status === 'forbidden') {
+          return res.status(403).json({
+            error: 'Access denied: this learning material belongs to another student account.',
+          });
+        }
+        if (access.status === 'ok' && access.doc.pages && !isPlaceholderContent(access.doc.pages)) {
+          pages = access.doc.pages;
+          if (!lessonTitle) lessonTitle = access.doc.title;
         }
       }
     }
@@ -1808,14 +1989,20 @@ app.post('/api/quiz', async (req: Request, res: Response) => {
   let { pages, lessonTitle, questionCount = 5, quizType = 'mixed', id, documentId, lessonId, filename } = req.body;
   const count = [5, 10, 15].includes(Number(questionCount)) ? Number(questionCount) : 5;
   try {
-    // If pages are missing or placeholder, attempt automatic reconstruction from server store
+    // If pages are missing or placeholder, attempt owner-scoped reconstruction from server store
     if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
       const lookupKey = id || documentId || lessonId || filename || lessonTitle;
       if (lookupKey) {
-        const stored = getDocumentFromStore(lookupKey);
-        if (stored && stored.pages && !isPlaceholderContent(stored.pages)) {
-          pages = stored.pages;
-          if (!lessonTitle) lessonTitle = stored.title;
+        const caller = await resolveCallerIdentity(req);
+        const access = checkDocumentAccess(lookupKey, caller.userId);
+        if (access.status === 'forbidden') {
+          return res.status(403).json({
+            error: 'Access denied: this learning material belongs to another student account.',
+          });
+        }
+        if (access.status === 'ok' && access.doc.pages && !isPlaceholderContent(access.doc.pages)) {
+          pages = access.doc.pages;
+          if (!lessonTitle) lessonTitle = access.doc.title;
         }
       }
     }
@@ -2021,10 +2208,16 @@ app.post('/api/analyze-chapters', async (req: Request, res: Response) => {
   if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
     const lookupKey = id || documentId || lessonId || filename || lessonTitle;
     if (lookupKey) {
-      const stored = getDocumentFromStore(lookupKey);
-      if (stored && stored.pages && !isPlaceholderContent(stored.pages)) {
-        pages = stored.pages;
-        if (!lessonTitle) lessonTitle = stored.title;
+      const caller = await resolveCallerIdentity(req);
+      const access = checkDocumentAccess(lookupKey, caller.userId);
+      if (access.status === 'forbidden') {
+        return res.status(403).json({
+          error: 'Access denied: this learning material belongs to another student account.',
+        });
+      }
+      if (access.status === 'ok' && access.doc.pages && !isPlaceholderContent(access.doc.pages)) {
+        pages = access.doc.pages;
+        if (!lessonTitle) lessonTitle = access.doc.title;
       }
     }
   }
@@ -2127,7 +2320,81 @@ Return a valid JSON object matching the schema with an array of chapters.`;
   return res.json({ success: true, chapters });
 });
 
-// 3.3 Complete Self-Reviewer Question Generator (Multi-Format, 4 Difficulties, Chapter-Filtered)
+// Helper: normalize a question stem for uniqueness deduplication across batches
+function normalizeQuestionStem(text: string): string {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Helper: sanitize generated question structure so fill-in-the-blank / identification never inherit MC distractors
+function sanitizeGeneratedQuestion(
+  q: any,
+  index: number,
+  difficulty: string,
+  requestedQuestionTypes: string,
+  fallbackChapter?: string
+) {
+  const validTypes = new Set([
+    'multiple_choice',
+    'fill_in_the_blank',
+    'identification',
+    'true_false',
+    'concept_contrasts',
+    'scenario',
+    'short_answer',
+  ]);
+  let qType = typeof q?.type === 'string' && validTypes.has(q.type) ? q.type : 'multiple_choice';
+  if (requestedQuestionTypes !== 'mixed' && validTypes.has(requestedQuestionTypes)) {
+    qType = requestedQuestionTypes;
+  }
+
+  const questionText = String(q?.question || '').trim();
+  const correctAnswer = String(q?.correctAnswer || '').trim();
+  const isTextInputType =
+    qType === 'fill_in_the_blank' || qType === 'identification' || qType === 'short_answer';
+
+  let options: string[] | undefined = undefined;
+  if (qType === 'true_false') {
+    options = ['True', 'False'];
+  } else if (!isTextInputType && Array.isArray(q?.options) && q.options.length >= 2) {
+    const cleanedOptions: string[] = q.options.map((opt: any) => String(opt || '').trim()).filter(Boolean);
+    if (cleanedOptions.length > 0 && correctAnswer && !cleanedOptions.some((opt: string) => opt.toLowerCase() === correctAnswer.toLowerCase())) {
+      cleanedOptions[0] = correctAnswer;
+    }
+    if (cleanedOptions.length >= 2) {
+      options = cleanedOptions;
+    }
+  }
+
+  const rawAccepted = Array.isArray(q?.acceptedAnswers)
+    ? q.acceptedAnswers.map((a: any) => String(a || '').trim()).filter(Boolean)
+    : [];
+  const acceptedAnswers = isTextInputType
+    ? buildAcceptedAnswers(correctAnswer, rawAccepted)
+    : rawAccepted.length > 0
+    ? rawAccepted
+    : undefined;
+
+  return {
+    id: `rq-${index + 1}`,
+    type: qType,
+    difficulty,
+    question: questionText,
+    ...(options ? { options } : {}),
+    correctAnswer,
+    ...(acceptedAnswers && acceptedAnswers.length > 0 ? { acceptedAnswers } : {}),
+    explanation: String(q?.explanation || 'Directly grounded in the lesson material.').trim(),
+    sourcePage: Math.max(1, Number(q?.sourcePage) || 1),
+    chapterOrSection: q?.chapterOrSection || fallbackChapter || 'General Review',
+    citationExcerpt: q?.citationExcerpt ? String(q.citationExcerpt).trim() : undefined,
+    topic: q?.topic ? String(q.topic).trim() : undefined,
+  };
+}
+
+// 3.3 Complete Self-Reviewer Question Generator (Multi-Format, 4 Difficulties, Chapter-Filtered, Batched up to 100)
 app.post('/api/reviewer-generate', async (req: Request, res: Response) => {
   let {
     pages,
@@ -2138,22 +2405,31 @@ app.post('/api/reviewer-generate', async (req: Request, res: Response) => {
     questionCount = 10,
     difficulty = 'medium',
     questionTypes = 'mixed',
+    excludeQuestions = [],
+    batchIndex,
+    totalBatches,
     id,
     documentId,
     lessonId,
     filename,
   } = req.body;
 
-  const count = Number(questionCount) || 10;
+  const count = Math.min(100, Math.max(1, Math.round(Number(questionCount) || 10)));
 
   try {
     if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
       const lookupKey = id || documentId || lessonId || filename || lessonTitle;
       if (lookupKey) {
-        const stored = getDocumentFromStore(lookupKey);
-        if (stored && stored.pages && !isPlaceholderContent(stored.pages)) {
-          pages = stored.pages;
-          if (!lessonTitle) lessonTitle = stored.title;
+        const caller = await resolveCallerIdentity(req);
+        const access = checkDocumentAccess(lookupKey, caller.userId);
+        if (access.status === 'forbidden') {
+          return res.status(403).json({
+            error: 'Access denied: this learning material belongs to another student account.',
+          });
+        }
+        if (access.status === 'ok' && access.doc.pages && !isPlaceholderContent(access.doc.pages)) {
+          pages = access.doc.pages;
+          if (!lessonTitle) lessonTitle = access.doc.title;
         }
       }
     }
@@ -2177,18 +2453,19 @@ app.post('/api/reviewer-generate', async (req: Request, res: Response) => {
 
     const totalTextLength = targetPages.reduce((acc, p) => acc + (p.text || '').length, 0);
 
-    // FEATURE 2: Validate whether uploaded material contains enough information
-    const minCharsRequired = count > 30 ? 1200 : count > 10 ? 600 : 250;
+    // Validate whether uploaded material contains enough information
+    const minCharsRequired = count >= 50 ? 600 : count > 10 ? 350 : 150;
     if (totalTextLength < minCharsRequired) {
       return res.status(200).json({
         success: false,
         insufficient: true,
-        availableQuestions: Math.max(5, Math.floor(totalTextLength / 80)),
+        requestedCount: count,
+        generatedCount: 0,
+        isComplete: false,
+        availableQuestions: Math.max(5, Math.floor(totalTextLength / 60)),
         message: `The selected document section contains only ${totalTextLength} characters of text, which is insufficient to generate ${count} unique, high-quality, non-repetitive questions without fabricating material. Please select a larger page range or choose fewer questions.`,
       });
     }
-
-    const lessonContext = formatLessonContext(targetPages);
 
     let difficultyGuide = '';
     if (difficulty === 'easy') {
@@ -2205,119 +2482,264 @@ app.post('/api/reviewer-generate', async (req: Request, res: Response) => {
     if (questionTypes === 'multiple_choice') {
       typeGuide = 'Generate ONLY Multiple Choice questions with 4 plausible, distinct options.';
     } else if (questionTypes === 'true_false') {
-      typeGuide = 'Generate ONLY True or False questions with options ["True", "False"].';
+      typeGuide = 'Generate ONLY True or False questions with options ["True", "False"] and correctAnswer "True" or "False".';
     } else if (questionTypes === 'fill_in_the_blank') {
-      typeGuide = 'Generate ONLY Fill in the Blank questions where the sentence has an explicit blank "____" and the correctAnswer is the exact missing term.';
+      typeGuide =
+        'Generate ONLY Fill in the Blank questions where the sentence has an explicit blank "____", correctAnswer is the exact concise missing term/phrase (1-5 words), acceptedAnswers lists valid exact synonyms/abbreviations from the text, and options is omitted/empty.';
     } else if (questionTypes === 'identification') {
-      typeGuide = 'Generate ONLY Identification questions where the student is asked to identify the concept, term, law, or theorist being described.';
+      typeGuide =
+        'Generate ONLY Identification questions asking the student to name the exact concept, term, law, person, or principle described; correctAnswer must be concise (1-5 words), acceptedAnswers lists valid exact alternates, and options is omitted/empty.';
     } else if (questionTypes === 'concept_contrasts') {
       typeGuide = 'Generate questions contrasting two related concepts from the document (e.g. differences, distinctions, or which applies in what case).';
     } else if (questionTypes === 'scenario') {
       typeGuide = 'Generate scenario questions based on realistic workplace, business, or academic situations relevant to the lesson.';
     } else if (questionTypes === 'short_answer') {
-      typeGuide = 'Generate Short Answer questions testing deep conceptual comprehension, including rubric criteria.';
+      typeGuide = 'Generate Short Answer questions testing deep conceptual comprehension with concise model correctAnswer and options omitted/empty.';
     } else {
-      typeGuide = 'Generate a balanced MIXED assortment of questions across Multiple Choice, True/False, Identification, Fill in the Blank, and Scenario questions.';
+      typeGuide =
+        'Generate a balanced MIXED assortment of questions across Multiple Choice, True/False, Identification, Fill in the Blank, and Scenario questions. Omit options for Fill in the Blank and Identification.';
     }
 
-    const prompt = `You are a university professor creating an authoritative, comprehensive college self-reviewer exam.
+    // Track already-seen stems (including externally passed excludeQuestions from frontend batches)
+    const seenStems = new Set<string>();
+    const recentExclusionList: string[] = [];
+    if (Array.isArray(excludeQuestions)) {
+      for (const rawStem of excludeQuestions) {
+        const clean = String(rawStem || '').trim();
+        if (!clean) continue;
+        const norm = normalizeQuestionStem(clean);
+        if (norm) seenStems.add(norm);
+        recentExclusionList.push(clean.slice(0, 140));
+      }
+    }
+
+    const collected: any[] = [];
+    const SERVER_BATCH_SIZE = 15;
+    const maxRounds = Math.min(12, Math.ceil(count / SERVER_BATCH_SIZE) + 3);
+    let consecutiveEmptyRounds = 0;
+
+    for (let round = 0; round < maxRounds && collected.length < count; round++) {
+      const remaining = count - collected.length;
+      const batchTarget = Math.min(SERVER_BATCH_SIZE, remaining);
+
+      // Rotate page slices across rounds so all pages of the document are evenly covered
+      const effectiveBatchIdx = typeof batchIndex === 'number' ? batchIndex + round : round;
+      const sliceSize = Math.max(1, Math.min(targetPages.length, Math.ceil(targetPages.length / Math.max(1, Math.min(4, Math.ceil(count / SERVER_BATCH_SIZE))))));
+      const startIdx = targetPages.length > sliceSize ? (effectiveBatchIdx * sliceSize) % targetPages.length : 0;
+      const roundPages: typeof targetPages = [];
+      for (let i = 0; i < Math.min(targetPages.length, Math.max(sliceSize, 6)); i++) {
+        roundPages.push(targetPages[(startIdx + i) % targetPages.length]);
+      }
+
+      const lessonContext = formatLessonContext(roundPages);
+      const avoidanceSample = recentExclusionList.slice(-45);
+      const avoidanceBlock =
+        avoidanceSample.length > 0
+          ? `\nALREADY GENERATED QUESTIONS (DO NOT REPEAT OR PARAPHRASE ANY OF THESE):\n${avoidanceSample.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n`
+          : '';
+
+      const prompt = `You are a university professor creating an authoritative, comprehensive college self-reviewer exam.
 
 LESSON TITLE: "${lessonTitle || 'College Learning Material'}"
 TARGET CHAPTER / SECTION: ${chapterId || 'Entire Document'}
-NUMBER OF QUESTIONS: ${count}
+BATCH PROGRESS: Generating ${batchTarget} NEW unique questions (Target batch ${effectiveBatchIdx + 1}${totalBatches ? ` of ${totalBatches}` : ''}).
 DIFFICULTY LEVEL: ${difficulty.toUpperCase()} (${difficultyGuide})
 QUESTION TYPES: ${questionTypes} (${typeGuide})
-
+${avoidanceBlock}
 SOURCE MATERIAL PAGES:
 ${lessonContext}
 
 CRITICAL RULES:
 1. Every single question MUST be grounded strictly in the source material pages provided above. Never invent facts or hallucinate external theories.
-2. Distribute questions evenly across the entire provided page range (not just page 1).
-3. For EVERY question, cite the exact sourcePage number.
-4. For EVERY question, include citationExcerpt: the exact verbatim sentence from that page proving the answer.
-5. Provide a clear educational explanation of why the answer is correct.
-6. For Multiple Choice, options MUST have 4 distinct choices, and correctAnswer MUST match one option exactly.
-7. Return exactly ${count} questions in the requested JSON structure.`;
+2. Every question in this batch MUST be 100% unique — do NOT repeat any question or test the exact same fact phrasing as the already-generated list.
+3. Distribute questions evenly across ALL provided pages (not just the first page).
+4. For EVERY question, cite the exact sourcePage number and include citationExcerpt (a brief verbatim sentence from that page proving the answer).
+5. Provide a clear, concise educational explanation of why the answer is correct.
+6. For Multiple Choice, options MUST have 4 distinct choices, and correctAnswer MUST match one option verbatim.
+7. For Fill in the Blank and Identification, correctAnswer MUST be the concise exact term/phrase (1-5 words), populate acceptedAnswers with any valid exact abbreviations or exact synonyms from the text, and leave options empty.
+8. Return EXACTLY ${batchTarget} distinct questions in the requested JSON structure.`;
 
-    const response = await generateContentWithRetry({
-      preferredModel: PRIMARY_MODEL,
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            questions: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  id: { type: Type.STRING },
-                  type: {
-                    type: Type.STRING,
-                    description: 'one of: multiple_choice, fill_in_the_blank, identification, true_false, concept_contrasts, scenario, short_answer',
+      try {
+        const response = await generateContentWithRetry({
+          preferredModel: PRIMARY_MODEL,
+          contents: prompt,
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                questions: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      id: { type: Type.STRING },
+                      type: {
+                        type: Type.STRING,
+                        description:
+                          'one of: multiple_choice, fill_in_the_blank, identification, true_false, concept_contrasts, scenario, short_answer',
+                      },
+                      difficulty: { type: Type.STRING },
+                      question: { type: Type.STRING },
+                      options: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                        description: '4 choices for MC, ["True", "False"] for TF; omit/empty for fill_in_the_blank, identification, short_answer',
+                      },
+                      correctAnswer: { type: Type.STRING },
+                      acceptedAnswers: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                        description: 'Optional list of valid exact synonyms/abbreviations for fill_in_the_blank or identification',
+                      },
+                      explanation: { type: Type.STRING },
+                      sourcePage: { type: Type.INTEGER },
+                      chapterOrSection: { type: Type.STRING },
+                      citationExcerpt: { type: Type.STRING },
+                      topic: { type: Type.STRING },
+                    },
+                    required: ['type', 'question', 'correctAnswer', 'explanation', 'sourcePage'],
                   },
-                  difficulty: { type: Type.STRING },
-                  question: { type: Type.STRING },
-                  options: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: '4 choices for MC, ["True", "False"] for TF, or plausible distractors',
-                  },
-                  correctAnswer: { type: Type.STRING },
-                  explanation: { type: Type.STRING },
-                  sourcePage: { type: Type.INTEGER },
-                  chapterOrSection: { type: Type.STRING },
-                  citationExcerpt: { type: Type.STRING },
-                  topic: { type: Type.STRING },
                 },
-                required: ['id', 'type', 'question', 'correctAnswer', 'explanation', 'sourcePage'],
               },
+              required: ['questions'],
             },
           },
-          required: ['questions'],
-        },
-      },
-    });
+        });
 
-    const parsed = JSON.parse(cleanJsonString(response.text || '{"questions":[]}'));
-    const generated = parsed.questions || [];
+        const parsed = JSON.parse(cleanJsonString(response.text || '{"questions":[]}'));
+        const batchQuestions = Array.isArray(parsed.questions) ? parsed.questions : [];
+        let addedThisRound = 0;
 
-    if (generated.length > 0) {
+        for (const rawQ of batchQuestions) {
+          if (collected.length >= count) break;
+          if (!rawQ?.question || !rawQ?.correctAnswer) continue;
+          const normStem = normalizeQuestionStem(rawQ.question);
+          if (!normStem || normStem.length < 10 || seenStems.has(normStem)) continue;
+
+          seenStems.add(normStem);
+          recentExclusionList.push(String(rawQ.question).trim().slice(0, 140));
+          collected.push(sanitizeGeneratedQuestion(rawQ, collected.length, difficulty, questionTypes, chapterId));
+          addedThisRound++;
+        }
+
+        if (addedThisRound === 0) {
+          consecutiveEmptyRounds++;
+          if (consecutiveEmptyRounds >= 2) break;
+        } else {
+          consecutiveEmptyRounds = 0;
+        }
+      } catch (roundErr: any) {
+        console.warn(`Reviewer batch round ${round + 1} failed:`, roundErr?.message || roundErr);
+        consecutiveEmptyRounds++;
+        if (consecutiveEmptyRounds >= 2) break;
+      }
+    }
+
+    // If Gemini succeeded partially or fully, return truthfully with explicit completeness metadata (never silently hide shortfall)
+    if (collected.length > 0) {
+      const isComplete = collected.length >= count;
       return res.json({
         success: true,
         insufficient: false,
-        questions: generated.map((q: any, i: number) => ({
-          ...q,
-          id: q.id || `rq-${i + 1}`,
-          difficulty: difficulty,
-        })),
+        requestedCount: count,
+        generatedCount: collected.length,
+        isComplete,
+        incompleteReason: isComplete
+          ? undefined
+          : `Generated ${collected.length} of ${count} requested unique questions from the selected material after bounded retries.`,
+        questions: collected.map((q, idx) => ({ ...q, id: `rq-${idx + 1}` })),
       });
     }
   } catch (err: any) {
     console.error('Self-reviewer generation error, utilizing grounded fallback:', err);
   }
 
-  // Grounded extraction fallback
-  const fallbackQuestions = extractQuizQuestionsFromPages(
+  // Grounded extraction fallback (NO hardcoded 15-question cap; truthfully reports if fewer than requested exist)
+  const fallbackRaw = extractQuizQuestionsFromPages(
     pages,
     lessonTitle,
-    Math.min(count, 15),
-    'mixed'
-  ).map((q, idx) => ({
-    ...q,
-    id: `rq-fallback-${idx + 1}`,
-    difficulty: difficulty,
-    chapterOrSection: chapterId || 'General Review',
-  }));
+    count,
+    questionTypes === 'true_false' ? 'true_false' : 'mixed'
+  );
+  const fallbackQuestions = fallbackRaw.map((q, idx) =>
+    sanitizeGeneratedQuestion(q, idx, difficulty, questionTypes === 'true_false' ? 'true_false' : q.type, chapterId)
+  );
+  const isComplete = fallbackQuestions.length >= count;
 
   return res.json({
     success: true,
     insufficient: false,
+    requestedCount: count,
+    generatedCount: fallbackQuestions.length,
+    isComplete,
+    incompleteReason: isComplete
+      ? undefined
+      : `AI service is temporarily busy. Generated ${fallbackQuestions.length} of ${count} requested questions directly from document citations.`,
     questions: fallbackQuestions,
     isHighTrafficFallback: true,
-    notice: 'Reviewer generated from document citations during peak traffic.',
+    notice: isComplete
+      ? 'Reviewer generated from document citations during peak traffic.'
+      : `Generated ${fallbackQuestions.length} of ${count} requested questions from document citations during peak traffic.`,
+  });
+});
+
+// 3.3b Server-Side Deterministic Quiz Grading Endpoint (validates fill-in-the-blank & all formats strictly)
+app.post('/api/quiz/grade', (req: Request, res: Response) => {
+  const { questions, answers } = req.body || {};
+  if (!Array.isArray(questions) || questions.length === 0) {
+    return res.status(400).json({ error: 'Questions array is required for quiz grading.' });
+  }
+  if (!Array.isArray(answers)) {
+    return res.status(400).json({ error: 'Answers array is required for quiz grading.' });
+  }
+
+  const answerMap = new Map<string, string>();
+  for (const ans of answers) {
+    if (ans && typeof ans.questionId === 'string') {
+      answerMap.set(ans.questionId, typeof ans.userAnswer === 'string' ? ans.userAnswer : '');
+    }
+  }
+
+  let score = 0;
+  const gradedAnswers = questions.map((q: any, idx: number) => {
+    const qId = String(q?.id || `rq-${idx + 1}`);
+    const submitted = answerMap.has(qId)
+      ? answerMap.get(qId) || ''
+      : typeof answers[idx]?.userAnswer === 'string'
+      ? answers[idx].userAnswer
+      : '';
+
+    const result = gradeQuizAnswer(
+      {
+        type: String(q?.type || 'multiple_choice'),
+        correctAnswer: String(q?.correctAnswer || ''),
+        acceptedAnswers: Array.isArray(q?.acceptedAnswers) ? q.acceptedAnswers : undefined,
+      },
+      submitted
+    );
+
+    if (result.isCorrect) score++;
+    return {
+      questionId: qId,
+      userAnswer: submitted,
+      isCorrect: result.isCorrect,
+      normalizedUserAnswer: result.normalizedUserAnswer,
+      expectedAnswer: result.expectedAnswer,
+      acceptedAnswers: result.acceptedNormalized,
+      reason: result.reason,
+    };
+  });
+
+  const totalQuestions = questions.length;
+  const percentage = totalQuestions > 0 ? Math.round((score / totalQuestions) * 100) : 0;
+
+  return res.json({
+    success: true,
+    totalQuestions,
+    score,
+    percentage,
+    gradedAnswers,
   });
 });
 
@@ -2327,10 +2749,16 @@ app.post('/api/generate-flashcards', async (req: Request, res: Response) => {
   if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
     const lookupKey = id || documentId || lessonId || filename || lessonTitle;
     if (lookupKey) {
-      const stored = getDocumentFromStore(lookupKey);
-      if (stored && stored.pages && !isPlaceholderContent(stored.pages)) {
-        pages = stored.pages;
-        if (!lessonTitle) lessonTitle = stored.title;
+      const caller = await resolveCallerIdentity(req);
+      const access = checkDocumentAccess(lookupKey, caller.userId);
+      if (access.status === 'forbidden') {
+        return res.status(403).json({
+          error: 'Access denied: this learning material belongs to another student account.',
+        });
+      }
+      if (access.status === 'ok' && access.doc.pages && !isPlaceholderContent(access.doc.pages)) {
+        pages = access.doc.pages;
+        if (!lessonTitle) lessonTitle = access.doc.title;
       }
     }
   }
@@ -2427,10 +2855,16 @@ app.post('/api/generate-contrasts', async (req: Request, res: Response) => {
   if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
     const lookupKey = id || documentId || lessonId || filename || lessonTitle;
     if (lookupKey) {
-      const stored = getDocumentFromStore(lookupKey);
-      if (stored && stored.pages && !isPlaceholderContent(stored.pages)) {
-        pages = stored.pages;
-        if (!lessonTitle) lessonTitle = stored.title;
+      const caller = await resolveCallerIdentity(req);
+      const access = checkDocumentAccess(lookupKey, caller.userId);
+      if (access.status === 'forbidden') {
+        return res.status(403).json({
+          error: 'Access denied: this learning material belongs to another student account.',
+        });
+      }
+      if (access.status === 'ok' && access.doc.pages && !isPlaceholderContent(access.doc.pages)) {
+        pages = access.doc.pages;
+        if (!lessonTitle) lessonTitle = access.doc.title;
       }
     }
   }
@@ -2549,14 +2983,20 @@ app.post('/api/ask-tutor', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Please enter a question for Study Buddy' });
     }
 
-    // If pages are missing or placeholder, attempt automatic reconstruction from server store
+    // If pages are missing or placeholder, attempt owner-scoped reconstruction from server store
     if (!pages || !Array.isArray(pages) || pages.length === 0 || isPlaceholderContent(pages)) {
       const lookupKey = id || documentId || lessonId || filename || lessonTitle;
       if (lookupKey) {
-        const stored = getDocumentFromStore(lookupKey);
-        if (stored && stored.pages && !isPlaceholderContent(stored.pages)) {
-          pages = stored.pages;
-          if (!lessonTitle) lessonTitle = stored.title;
+        const caller = await resolveCallerIdentity(req);
+        const access = checkDocumentAccess(lookupKey, caller.userId);
+        if (access.status === 'forbidden') {
+          return res.status(403).json({
+            error: 'Access denied: this learning material belongs to another student account.',
+          });
+        }
+        if (access.status === 'ok' && access.doc.pages && !isPlaceholderContent(access.doc.pages)) {
+          pages = access.doc.pages;
+          if (!lessonTitle) lessonTitle = access.doc.title;
         }
       }
     }

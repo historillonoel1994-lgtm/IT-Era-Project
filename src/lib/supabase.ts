@@ -20,6 +20,27 @@ const STORAGE_KEYS = {
   KEY: 'studybuddy_supabase_key',
 };
 
+function isTransientNetworkError(err: any): boolean {
+  if (!err) return false;
+  const msg = String(err?.message || err?.details || err || '').toLowerCase();
+  return (
+    msg.includes('failed to fetch') ||
+    msg.includes('networkerror') ||
+    msg.includes('load failed') ||
+    msg.includes('network request failed') ||
+    msg.includes('aborted') ||
+    (typeof navigator !== 'undefined' && navigator.onLine === false)
+  );
+}
+
+function logDbIssue(label: string, err: any): void {
+  if (isTransientNetworkError(err)) {
+    console.warn(`${label} (transient network issue):`, err?.message || err);
+  } else {
+    console.error(`${label}:`, err);
+  }
+}
+
 // Check if valid URL and non-placeholder key are provided
 export function isValidSupabaseConfig(url: string, key: string): boolean {
   if (!url || !key) return false;
@@ -305,10 +326,11 @@ export async function ensureUserProfileAndProgress(
       .maybeSingle();
 
     if (profileFetchErr) {
-      console.warn('Profiles fetch warning:', profileFetchErr.message);
+      logDbIssue('Profiles fetch warning', profileFetchErr);
     }
 
-    if (!existingProfile) {
+    // Do not attempt cascading insert/upsert retries if the network itself is temporarily unreachable
+    if (!existingProfile && !isTransientNetworkError(profileFetchErr)) {
       let { data: insertedProfile, error: insertProfileErr } = await supabase
         .from('profiles')
         .insert({
@@ -324,7 +346,7 @@ export async function ensureUserProfileAndProgress(
         .maybeSingle();
 
       // If failed due to extra columns (e.g. avatar_seed, degree, job_title not in user's schema), fallback to email+name, then minimal (id, full_name)
-      if (insertProfileErr) {
+      if (insertProfileErr && !isTransientNetworkError(insertProfileErr)) {
         console.warn('Profile DB insert fallback (detailed -> basic):', insertProfileErr.message);
         const retryBasic = await supabase
           .from('profiles')
@@ -336,7 +358,7 @@ export async function ensureUserProfileAndProgress(
           .select()
           .maybeSingle();
 
-        if (retryBasic.error) {
+        if (retryBasic.error && !isTransientNetworkError(retryBasic.error)) {
           console.warn('Profile DB insert fallback (basic -> minimal):', retryBasic.error.message);
           const retryMinimal = await supabase
             .from('profiles')
@@ -351,13 +373,17 @@ export async function ensureUserProfileAndProgress(
             .maybeSingle();
 
           if (retryMinimal.error) {
-            console.error('Profile DB error (minimal fallback):', retryMinimal.error);
+            logDbIssue('Profile DB error (minimal fallback)', retryMinimal.error);
           } else {
             insertedProfile = retryMinimal.data;
           }
+        } else if (retryBasic.error) {
+          logDbIssue('Profile DB insert warning', retryBasic.error);
         } else {
           insertedProfile = retryBasic.data;
         }
+      } else if (insertProfileErr) {
+        logDbIssue('Profile DB insert warning', insertProfileErr);
       }
 
       if (insertedProfile) {
@@ -397,7 +423,7 @@ export async function ensureUserProfileAndProgress(
     profile.role = verifiedRole.role;
     profile.accountStatus = verifiedRole.accountStatus;
   } catch (profileErr) {
-    console.error('Profile DB error:', profileErr);
+    logDbIssue('Profile DB error', profileErr);
   }
 
   // 2. Populate study_progress with required initial zero fields if missing:
@@ -409,7 +435,7 @@ export async function ensureUserProfileAndProgress(
       .eq('user_id', user.id);
 
     if (progFetchErr) {
-      console.error('Progress DB error:', progFetchErr);
+      logDbIssue('Progress DB error', progFetchErr);
     }
 
     if (!progFetchErr && (!existingProgressRows || existingProgressRows.length === 0)) {
@@ -421,7 +447,7 @@ export async function ensureUserProfileAndProgress(
       });
 
       if (progInsertErr) {
-        console.error('Progress DB error:', progInsertErr);
+        logDbIssue('Progress DB error', progInsertErr);
       }
     } else if (existingProgressRows && existingProgressRows.length > 1) {
       // Multiple duplicate rows exist for this user in study_progress. Consolidate and clean up duplicates.
@@ -436,7 +462,7 @@ export async function ensureUserProfileAndProgress(
           .filter((r: any) => r.id && r.id !== bestRow.id)
           .map((r: any) => r.id);
         if (dupIds.length > 0) {
-          await supabase.from('study_progress').delete().in('id', dupIds);
+          await supabase.from('study_progress').delete().eq('user_id', user.id).in('id', dupIds);
         }
       }
     }
@@ -671,7 +697,7 @@ export async function fetchStudentMaterials(
     }
 
     if (materialError) {
-      console.error('Material DB error:', materialError);
+      logDbIssue('Material DB error', materialError);
       return { data: [], error: materialError.message };
     }
 
@@ -692,9 +718,11 @@ export async function fetchStudentMaterials(
       }
     }
 
-    // Clean up redundant duplicate rows in Supabase background
+    // Clean up redundant duplicate rows in Supabase background (strictly scoped to current student)
     if (duplicateIdsToRemove.length > 0) {
-      void Promise.resolve(supabase.from('learning_materials').delete().in('id', duplicateIdsToRemove)).catch(() => {});
+      void Promise.resolve(
+        supabase.from('learning_materials').delete().eq('user_id', userId).in('id', duplicateIdsToRemove)
+      ).catch(() => {});
     }
 
     const mapped: LessonDocument[] = deduplicatedRows.map((row: any) => {
@@ -720,7 +748,7 @@ export async function fetchStudentMaterials(
 
     return { data: mapped, error: null };
   } catch (err: any) {
-    console.error('Material DB error:', err);
+    logDbIssue('Material DB error', err);
     return { data: [], error: err.message || 'Failed to fetch learning materials.' };
   }
 }
@@ -853,7 +881,7 @@ export async function fetchStudentQuizAttempts(
     }
 
     if (quizError) {
-      console.error('Quiz DB error:', quizError);
+      logDbIssue('Quiz DB error', quizError);
       return { attempts: [], error: quizError.message };
     }
 
@@ -882,14 +910,16 @@ export async function fetchStudentQuizAttempts(
       }
     }
 
-    // Clean up duplicate quiz attempts in Supabase background
+    // Clean up duplicate quiz attempts in Supabase background (strictly scoped to current student)
     if (duplicateIdsToRemove.length > 0) {
-      void Promise.resolve(supabase.from('quiz_attempts').delete().in('id', duplicateIdsToRemove)).catch(() => {});
+      void Promise.resolve(
+        supabase.from('quiz_attempts').delete().eq('user_id', userId).in('id', duplicateIdsToRemove)
+      ).catch(() => {});
     }
 
     return { attempts: deduplicatedAttempts, error: null };
   } catch (err: any) {
-    console.error('Quiz DB error:', err);
+    logDbIssue('Quiz DB error', err);
     return { attempts: [], error: err.message || 'Failed to fetch quiz attempts.' };
   }
 }
@@ -944,7 +974,7 @@ export async function fetchStudyProgressFromSupabase(
       .eq('user_id', userId);
 
     if (progressError) {
-      console.error('Progress DB error:', progressError);
+      logDbIssue('Progress DB error', progressError);
     }
 
     let progressRow = progressRows && progressRows.length > 0 ? progressRows[0] : null;
@@ -962,7 +992,7 @@ export async function fetchStudyProgressFromSupabase(
           .filter((r: any) => r.id && r.id !== progressRow.id)
           .map((r: any) => r.id);
         if (dupIds.length > 0) {
-          await supabase.from('study_progress').delete().in('id', dupIds);
+          await supabase.from('study_progress').delete().eq('user_id', userId).in('id', dupIds);
         }
       }
     }
@@ -980,7 +1010,7 @@ export async function fetchStudyProgressFromSupabase(
         .select();
 
       if (insertError) {
-        console.error('Progress DB error:', insertError);
+        logDbIssue('Progress DB error', insertError);
       } else if (newRows && newRows.length > 0) {
         progressRow = newRows[0];
       }
@@ -993,7 +1023,7 @@ export async function fetchStudyProgressFromSupabase(
       .eq('user_id', userId);
 
     if (quizError) {
-      console.error('Quiz DB error:', quizError);
+      logDbIssue('Quiz DB error', quizError);
     }
 
     // Deduplicate attempts if double entries exist
@@ -1029,7 +1059,7 @@ export async function fetchStudyProgressFromSupabase(
       .eq('user_id', userId);
 
     if (matErr) {
-      console.error('Material DB error:', matErr);
+      logDbIssue('Material DB error', matErr);
     }
 
     const calculatedProgress: StudentProgress = {
@@ -1044,7 +1074,7 @@ export async function fetchStudyProgressFromSupabase(
 
     return { progress: calculatedProgress, error: null };
   } catch (err: any) {
-    console.error('Progress DB error:', err);
+    logDbIssue('Progress DB error', err);
     return { progress: null, error: err.message || 'Failed to fetch study progress.' };
   }
 }
@@ -1127,7 +1157,7 @@ export async function updateStudyProgressInSupabase(updates: {
       if (rows && rows.length > 1 && curRow.id) {
         const dupIds = rows.filter((r: any) => r.id && r.id !== curRow.id).map((r: any) => r.id);
         if (dupIds.length > 0) {
-          await supabase.from('study_progress').delete().in('id', dupIds);
+          await supabase.from('study_progress').delete().eq('user_id', user.id).in('id', dupIds);
         }
       }
     } else {
@@ -1287,11 +1317,30 @@ export async function verifyUserRoleWithServer(params: {
       }
     }
 
-    const res = await fetch(apiUrl('/api/auth/verify-role'), {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(params),
-    });
+    let res: Response | null = null;
+    let lastFetchErr: any = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        res = await fetch(apiUrl('/api/auth/verify-role'), {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(params),
+        });
+        lastFetchErr = null;
+        break;
+      } catch (fetchErr) {
+        lastFetchErr = fetchErr;
+        if (attempt === 0 && isTransientNetworkError(fetchErr)) {
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          continue;
+        }
+        throw fetchErr;
+      }
+    }
+
+    if (!res) {
+      throw lastFetchErr || new Error('Role verification request did not complete.');
+    }
 
     const data = await res.json();
     if (!res.ok) {
@@ -1311,14 +1360,18 @@ export async function verifyUserRoleWithServer(params: {
       isAdmin: Boolean(data.isAdmin),
     };
   } catch (err: any) {
-    console.error('Server role verification network error:', err);
+    if (isTransientNetworkError(err)) {
+      console.warn('Server role verification deferred (transient network issue):', err?.message || err);
+    } else {
+      console.error('Server role verification error:', err);
+    }
     // Safe default to student if server check fails
     return {
       role: 'student',
       accountStatus: 'active',
       isSuperAdmin: false,
       isAdmin: false,
-      error: err.message,
+      error: err?.message,
     };
   }
 }

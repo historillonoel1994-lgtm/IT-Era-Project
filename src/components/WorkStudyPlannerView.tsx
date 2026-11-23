@@ -27,6 +27,8 @@ import {
   saveTodayPlan,
 } from '../services/storage';
 import { suggestStudySchedule } from '../services/api';
+import { formatTimeRange12Hour, getStartMinutesForSort } from '../utils/timeFormat';
+import { Time12Picker } from './Time12Picker';
 
 interface WorkStudyPlannerViewProps {
   onNavigateToTodayPlan: () => void;
@@ -315,7 +317,7 @@ export const WorkStudyPlannerView: React.FC<WorkStudyPlannerViewProps> = ({
                 <div className="flex items-center justify-between text-xs">
                   <span className="font-bold text-sky-900">{session.day}</span>
                   <span className="text-[11px] font-semibold text-slate-500">
-                    {session.timeSlot}
+                    {formatTimeRange12Hour(session.timeSlot)}
                   </span>
                 </div>
                 <h4 className="text-xs font-bold text-slate-800 leading-snug">
@@ -392,23 +394,23 @@ export const WorkStudyPlannerView: React.FC<WorkStudyPlannerViewProps> = ({
                 </select>
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">Start Time</label>
-                  <input
-                    type="time"
+                  <Time12Picker
                     value={newWorkStart}
-                    onChange={(e) => setNewWorkStart(e.target.value)}
-                    className="w-full p-2 border border-slate-300 rounded-lg bg-white"
+                    onChange={setNewWorkStart}
+                    ariaLabel="Work shift start time"
+                    compact
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">End Time</label>
-                  <input
-                    type="time"
+                  <Time12Picker
                     value={newWorkEnd}
-                    onChange={(e) => setNewWorkEnd(e.target.value)}
-                    className="w-full p-2 border border-slate-300 rounded-lg bg-white"
+                    onChange={setNewWorkEnd}
+                    ariaLabel="Work shift end time"
+                    compact
                   />
                 </div>
               </div>
@@ -443,16 +445,21 @@ export const WorkStudyPlannerView: React.FC<WorkStudyPlannerViewProps> = ({
           )}
 
           <div className="space-y-2">
-            {workList.map((item) => (
+            {[...workList]
+              .sort((a, b) => {
+                const dayDiff = DAYS_OF_WEEK.indexOf(a.day) - DAYS_OF_WEEK.indexOf(b.day);
+                return dayDiff !== 0 ? dayDiff : getStartMinutesForSort(a.startTime) - getStartMinutesForSort(b.startTime);
+              })
+              .map((item) => (
               <div
                 key={item.id}
                 className="p-3 bg-slate-50 hover:bg-slate-100/70 border border-slate-200/70 rounded-xl flex items-center justify-between text-xs"
               >
                 <div>
-                  <div className="flex items-center space-x-2">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                     <span className="font-bold text-slate-900">{item.day}</span>
                     <span className="text-slate-500 font-medium">
-                      {item.startTime} - {item.endTime}
+                      {formatTimeRange12Hour(item.startTime, item.endTime)}
                     </span>
                   </div>
                   {item.jobRole && (
@@ -522,23 +529,23 @@ export const WorkStudyPlannerView: React.FC<WorkStudyPlannerViewProps> = ({
                 </select>
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">Start Time</label>
-                  <input
-                    type="time"
+                  <Time12Picker
                     value={newClassStart}
-                    onChange={(e) => setNewClassStart(e.target.value)}
-                    className="w-full p-2 border border-slate-300 rounded-lg bg-white"
+                    onChange={setNewClassStart}
+                    ariaLabel="Class start time"
+                    compact
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">End Time</label>
-                  <input
-                    type="time"
+                  <Time12Picker
                     value={newClassEnd}
-                    onChange={(e) => setNewClassEnd(e.target.value)}
-                    className="w-full p-2 border border-slate-300 rounded-lg bg-white"
+                    onChange={setNewClassEnd}
+                    ariaLabel="Class end time"
+                    compact
                   />
                 </div>
               </div>
@@ -573,18 +580,23 @@ export const WorkStudyPlannerView: React.FC<WorkStudyPlannerViewProps> = ({
           )}
 
           <div className="space-y-2">
-            {classList.map((item) => (
+            {[...classList]
+              .sort((a, b) => {
+                const dayDiff = DAYS_OF_WEEK.indexOf(a.day) - DAYS_OF_WEEK.indexOf(b.day);
+                return dayDiff !== 0 ? dayDiff : getStartMinutesForSort(a.startTime) - getStartMinutesForSort(b.startTime);
+              })
+              .map((item) => (
               <div
                 key={item.id}
                 className="p-3 bg-slate-50 hover:bg-slate-100/70 border border-slate-200/70 rounded-xl flex items-center justify-between text-xs"
               >
                 <div>
                   <span className="font-bold text-slate-900 block">{item.subject}</span>
-                  <div className="flex items-center space-x-2 text-[11px] text-slate-500">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-500">
                     <span className="font-semibold text-sky-800">{item.day}</span>
                     <span>•</span>
                     <span>
-                      {item.startTime} - {item.endTime}
+                      {formatTimeRange12Hour(item.startTime, item.endTime)}
                     </span>
                     {item.roomOrLink && (
                       <>

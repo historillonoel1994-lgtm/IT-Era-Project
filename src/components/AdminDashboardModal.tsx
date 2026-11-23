@@ -1566,7 +1566,14 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                         {filteredAuditLogs.map((log) => (
                           <tr key={log.id} className="hover:bg-slate-50/70 transition-colors">
                             <td className="px-4 py-3 text-slate-500 font-mono text-[11px] whitespace-nowrap">
-                              {new Date(log.createdAt).toLocaleString()}
+                              {new Date(log.createdAt).toLocaleString('en-US', {
+                                month: 'short',
+                                day: 'numeric',
+                                year: 'numeric',
+                                hour: 'numeric',
+                                minute: '2-digit',
+                                hour12: true,
+                              })}
                             </td>
                             <td className="px-4 py-3">
                               <span className="px-2 py-0.5 bg-indigo-50 border border-indigo-200 text-indigo-800 rounded-md font-mono text-[10px] font-bold">

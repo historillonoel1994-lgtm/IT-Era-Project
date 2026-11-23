@@ -435,6 +435,9 @@ export interface ReviewerGenerateParams {
   questionCount: number;
   difficulty: ReviewerDifficulty;
   questionTypes: string;
+  excludeQuestions?: string[];
+  batchIndex?: number;
+  totalBatches?: number;
   lessonId?: string;
   documentId?: string;
   filename?: string;
@@ -444,10 +447,32 @@ export interface ReviewerGenerateResult {
   success: boolean;
   insufficient?: boolean;
   availableQuestions?: number;
+  requestedCount?: number;
+  generatedCount?: number;
+  isComplete?: boolean;
+  incompleteReason?: string;
   message?: string;
   questions: ReviewerQuestion[];
   isHighTrafficFallback?: boolean;
   notice?: string;
+}
+
+export interface ServerGradedAnswer {
+  questionId: string;
+  userAnswer: string;
+  isCorrect: boolean;
+  normalizedUserAnswer: string;
+  expectedAnswer: string;
+  acceptedAnswers: string[];
+  reason: string;
+}
+
+export interface ServerQuizGradeResult {
+  success: boolean;
+  totalQuestions: number;
+  score: number;
+  percentage: number;
+  gradedAnswers: ServerGradedAnswer[];
 }
 
 export async function generateSelfReviewer(params: ReviewerGenerateParams): Promise<ReviewerGenerateResult> {
@@ -460,6 +485,32 @@ export async function generateSelfReviewer(params: ReviewerGenerateParams): Prom
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
     throw new Error(errorData.error || 'Failed to generate self-reviewer questions');
+  }
+
+  return response.json();
+}
+
+export async function gradeQuizSubmission(
+  questions: ReviewerQuestion[],
+  answers: { questionId: string; userAnswer: string }[]
+): Promise<ServerQuizGradeResult> {
+  const response = await fetch(apiUrl('/api/quiz/grade'), {
+    method: 'POST',
+    headers: await buildApiHeaders(),
+    body: JSON.stringify({
+      questions: questions.map((q) => ({
+        id: q.id,
+        type: q.type,
+        correctAnswer: q.correctAnswer,
+        acceptedAnswers: q.acceptedAnswers,
+      })),
+      answers,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to validate quiz score on server.');
   }
 
   return response.json();

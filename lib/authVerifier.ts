@@ -155,9 +155,22 @@ export async function verifySupabaseAccessToken(token: string): Promise<Verified
   };
 }
 
-export function getAllowedCorsOrigin(originHeader?: string): string | null {
+export function getAllowedCorsOrigin(originHeader?: string, requestHost?: string): string | null {
   if (!originHeader || typeof originHeader !== 'string') return null;
   const cleanOrigin = originHeader.trim().replace(/\/+$/, '');
+
+  // Always allow same-origin requests matching the request Host header
+  if (requestHost) {
+    try {
+      const originHost = new URL(cleanOrigin).host.toLowerCase();
+      const normalizedHost = requestHost.split(',')[0].trim().toLowerCase();
+      if (originHost && normalizedHost && originHost === normalizedHost) {
+        return cleanOrigin;
+      }
+    } catch {
+      // Fall through to allowlist check
+    }
+  }
 
   const envListOrigins = (process.env.ALLOWED_ORIGINS || '')
     .split(',')

@@ -331,6 +331,7 @@ export interface ReviewerQuestion {
   question: string;
   options?: string[]; // For multiple choice & true/false
   correctAnswer: string;
+  acceptedAnswers?: string[]; // Valid exact alternates/abbreviations for fill-in-the-blank & identification
   explanation: string;
   sourcePage: number | string;
   chapterOrSection?: string;

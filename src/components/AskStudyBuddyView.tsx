@@ -25,6 +25,7 @@ import { CitationModal } from './CitationModal';
 import { AudioTeachingPlayer } from './AudioTeachingPlayer';
 import { buildLessonAudioScript } from '../services/speech';
 import { loadAndReconstructLesson, isPlaceholderContent } from '../services/storage';
+import { formatTimestamp12Hour } from '../utils/timeFormat';
 
 interface AskStudyBuddyViewProps {
   lesson: LessonDocument;
@@ -80,7 +81,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
       text: isPlaceholderContent(lesson.pages)
         ? `I have detected **${lesson.title}**, but its complete page content needs to be verified before answering document-specific questions.`
         : `Hello! I'm **Study Buddy**, your dedicated AI learning tutor. I have read **${lesson.title}** (${lesson.totalPages} pages).\n\nI operate an automatic **Two-Source Answer System**:\n• **📘 Uploaded Learning Material**: If your question is covered in your uploaded document, I search your document first and answer strictly using your lesson pages with verifiable page citations.\n• **✨ Gemini / Google AI**: If your question is outside or not covered in your lesson, I answer using Gemini general knowledge with a clear disclaimer notice.\n\nYou can also switch to **💡 Feynman Tutor** mode for simplified everyday analogies!\n\nAsk me anything to get started!`,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      timestamp: formatTimestamp12Hour(new Date()),
     },
   ]);
   const [input, setInput] = useState('');
@@ -110,7 +111,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
                 sourceLabel: 'Source: Uploaded Learning Material',
                 lessonTitle: reconstructed.title,
                 text: `Complete document loaded! I have read all **${reconstructed.totalPages} pages** of **${reconstructed.title}**. Ask me any question, definition, formula, or concept from this material!`,
-                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                timestamp: formatTimestamp12Hour(new Date()),
               },
             ]);
           } else {
@@ -149,7 +150,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
             sourceLabel: 'Source: Uploaded Learning Material',
             lessonTitle: reconstructed.title,
             text: `Document processed successfully! All ${reconstructed.totalPages} pages are ready for question-and-answer.`,
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            timestamp: formatTimestamp12Hour(new Date()),
           },
         ]);
       } else {
@@ -189,7 +190,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
       id: `msg-${Date.now()}`,
       sender: 'user',
       text: trimmed,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      timestamp: formatTimestamp12Hour(new Date()),
     };
 
     setMessages((prev) => [...prev, userMsg]);
@@ -207,7 +208,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
           sourceLabel: 'Source: Gemini / Google AI',
           sourceNotice:
             'This topic is not directly discussed in your uploaded learning material. The following answer is based on general Gemini knowledge.',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          timestamp: formatTimestamp12Hour(new Date()),
         };
         setMessages((prev) => [...prev, tutorMsg]);
 
@@ -231,7 +232,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
           sourceType: 'gemini',
           sourceLabel: 'Source: Gemini / Google AI',
           sourceNotice: 'Answer provided using Study Buddy offline tutor mode.',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          timestamp: formatTimestamp12Hour(new Date()),
         };
         setMessages((prev) => [...prev, tutorMsg]);
       } finally {
@@ -245,7 +246,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
         id: `msg-warning-${Date.now()}`,
         sender: 'tutor',
         text: 'This learning material needs to be processed again to access its complete content. Please click "Reprocess Learning Material" above to extract all pages.',
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        timestamp: formatTimestamp12Hour(new Date()),
       };
       setMessages((prev) => [...prev, warningMsg]);
       setLoading(false);
@@ -288,7 +289,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
         lessonTitle: res.lessonTitle || currentDoc.title,
         mode,
         isSafeguardNotice: res.isSafeguardTriggered,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        timestamp: formatTimestamp12Hour(new Date()),
       };
 
       setMessages((prev) => [...prev, tutorMsg]);
@@ -363,7 +364,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
           citationExcerpt: excerpt,
           lessonTitle: currentDoc.title,
           mode,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          timestamp: formatTimestamp12Hour(new Date()),
         };
         setMessages((prev) => [...prev, tutorMsg]);
       } else {
@@ -375,7 +376,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
           sourceType: 'gemini',
           sourceLabel: 'Source: Study Buddy Tutor',
           sourceNotice: notice,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          timestamp: formatTimestamp12Hour(new Date()),
         };
         setMessages((prev) => [...prev, tutorMsg]);
       }
@@ -403,7 +404,7 @@ export const AskStudyBuddyView: React.FC<AskStudyBuddyViewProps> = ({
           mode === 'general'
             ? 'Chat cleared! What general topic or question would you like to explore?'
             : `Chat cleared! What would you like to review from **${lesson.title}**? (Questions not covered will be automatically answered with Gemini general knowledge).`,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        timestamp: formatTimestamp12Hour(new Date()),
       },
     ]);
   };

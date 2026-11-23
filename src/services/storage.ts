@@ -31,6 +31,7 @@ import {
   fetchStudentMaterials,
   fetchStudentQuizAttempts,
   fetchStudyProgressFromSupabase,
+  setCurrentLearningMaterialId,
   supabase,
   STORAGE_BUCKET,
 } from '../lib/supabase';
@@ -186,7 +187,7 @@ function safeSet<T>(key: string, value: T): void {
   }
 }
 
-// Clear user-scoped data when switching to a different account or signing out
+// Clear all user-scoped local & in-memory data when switching to a different account or signing out
 export function resetUserScopedLocalData(nextUserId?: string): void {
   try {
     const prevUserId = localStorage.getItem(KEYS.LAST_USER_ID);
@@ -199,12 +200,17 @@ export function resetUserScopedLocalData(nextUserId?: string): void {
     localStorage.removeItem(KEYS.SUMMARIES);
     localStorage.removeItem(KEYS.QUIZ_RESULTS);
     localStorage.removeItem(KEYS.PROGRESS);
+    localStorage.removeItem(KEYS.WORK_SCHEDULE);
+    localStorage.removeItem(KEYS.CLASS_SCHEDULE);
+    localStorage.removeItem(KEYS.SCHOOL_TASKS);
+    localStorage.removeItem(KEYS.TODAY_PLAN);
     localStorage.removeItem(KEYS.AUDIO_SESSIONS);
     localStorage.removeItem(KEYS.REVIEWER_ATTEMPTS);
     localStorage.removeItem(KEYS.FLASHCARD_PROGRESS);
     localStorage.removeItem(KEYS.MEMORIZATION_PROGRESS);
     localStorage.removeItem(KEYS.DOCUMENTS_CONTENT);
     localStorage.removeItem('studybuddy_current_material_id');
+    setCurrentLearningMaterialId(null);
 
     if (nextUserId) {
       localStorage.setItem(KEYS.LAST_USER_ID, nextUserId);
@@ -583,10 +589,17 @@ export async function loadAndReconstructLesson(
     }
   }
 
-  // 4. If document has a file in Supabase Storage, download and reprocess
-  const storagePath = found?.filePath || (found?.fileName ? `materials/${found.fileName}` : null);
-  if (storagePath && checkIsConfigured()) {
+  // 4. If document has a private file in Supabase Storage owned by the signed-in student, download and reprocess
+  const rawStoragePath = found?.filePath ? found.filePath.replace(/\\/g, '/').replace(/^\/+/, '') : null;
+  if (rawStoragePath && !rawStoragePath.includes('..') && checkIsConfigured()) {
     try {
+      const { data: authData } = await supabase.auth.getUser();
+      const signedInUid = authData?.user?.id;
+      // Enforce strict per-UID storage folder ownership so one student can never download another student's file
+      if (!signedInUid || !rawStoragePath.startsWith(`${signedInUid}/`)) {
+        return found!;
+      }
+      const storagePath = rawStoragePath;
       const { data: fileBlob, error: downloadError } = await supabase.storage
         .from(STORAGE_BUCKET)
         .download(storagePath);

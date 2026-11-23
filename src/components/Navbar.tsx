@@ -12,10 +12,13 @@ import {
   ChevronDown,
   Shield,
   ShieldCheck,
-  Database,
   LogIn,
-  Settings,
   Compass,
+  Home,
+  LayoutGrid,
+  Layers,
+  Brain,
+  X,
 } from 'lucide-react';
 import { LessonDocument, UserProfile } from '../types';
 import { StudyBuddyLogo } from './StudyBuddyLogo';
@@ -32,6 +35,9 @@ export type NavTab =
 interface NavbarProps {
   currentTab: NavTab;
   onTabChange: (tab: NavTab) => void;
+  onMobileNavigate?: (tab: NavTab, options?: { scrollToContent?: boolean; quizSubTab?: 'practice_exam' | 'flashcards' | 'contrasts' | 'memorization' }) => void;
+  onGoHome?: () => void;
+  activeQuizSubTab?: 'practice_exam' | 'flashcards' | 'contrasts' | 'memorization';
   activeLesson: LessonDocument;
   lessons: LessonDocument[];
   onSelectLesson: (lesson: LessonDocument) => void;
@@ -50,6 +56,9 @@ interface NavbarProps {
 export const Navbar: React.FC<NavbarProps> = ({
   currentTab,
   onTabChange,
+  onMobileNavigate,
+  onGoHome,
+  activeQuizSubTab = 'practice_exam',
   activeLesson,
   lessons,
   onSelectLesson,
@@ -67,22 +76,43 @@ export const Navbar: React.FC<NavbarProps> = ({
   const [showLessonDropdown, setShowLessonDropdown] = React.useState(false);
   const [showAllLessons, setShowAllLessons] = React.useState(false);
   const [showUserDropdown, setShowUserDropdown] = useState(false);
+  const [showMobileMore, setShowMobileMore] = useState(false);
+  const [mobileHomeActive, setMobileHomeActive] = useState(true);
 
   const isAdmin = isLoggedIn && !isDemoMode && (user.role === 'admin' || user.role === 'super_admin');
   const isSuperAdmin = isLoggedIn && !isDemoMode && user.role === 'super_admin';
 
+  const isMoreSectionActive =
+    currentTab === 'today' ||
+    currentTab === 'timer' ||
+    currentTab === 'progress' ||
+    (currentTab === 'quiz' && activeQuizSubTab !== 'practice_exam');
+
+  const navigateMobile = (
+    tab: NavTab,
+    options?: { scrollToContent?: boolean; quizSubTab?: 'practice_exam' | 'flashcards' | 'contrasts' | 'memorization' }
+  ) => {
+    setMobileHomeActive(false);
+    setShowMobileMore(false);
+    if (onMobileNavigate) {
+      onMobileNavigate(tab, options);
+    } else {
+      onTabChange(tab);
+    }
+  };
+
   return (
     <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200 shadow-2xs">
       {/* Main Nav Header */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4">
+      <div className="max-w-7xl mx-auto px-3 sm:px-6 py-2.5 sm:py-3 flex items-center justify-between gap-2 sm:gap-4">
         {/* Logo and Brand */}
-        <div className="flex items-center space-x-3 shrink-0">
+        <div className="flex items-center space-x-2.5 sm:space-x-3 shrink-0 min-w-0">
           <StudyBuddyLogo size="md" />
-          <div>
-            <h1 className="font-extrabold text-lg text-slate-900 tracking-tight leading-tight">
+          <div className="min-w-0">
+            <h1 className="font-extrabold text-base sm:text-lg text-slate-900 tracking-tight leading-tight truncate">
               Study Buddy <span className="text-sky-600">AI</span>
             </h1>
-            <p className="text-[11px] text-slate-500 font-medium">
+            <p className="hidden sm:block text-[11px] text-slate-500 font-medium">
               Smart Support for Working Students
             </p>
           </div>
@@ -348,8 +378,11 @@ export const Navbar: React.FC<NavbarProps> = ({
         </div>
       </div>
 
-      {/* Navigation Tabs Bar */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 flex space-x-1 overflow-x-auto no-scrollbar border-t border-slate-100 pt-1">
+      {/* Desktop Navigation Tabs Bar (Preserved Desktop Layout) */}
+      <nav
+        aria-label="Primary desktop navigation"
+        className="hidden md:flex max-w-7xl mx-auto px-4 sm:px-6 space-x-1 overflow-x-auto no-scrollbar border-t border-slate-100 pt-1"
+      >
         {/* Main 3 Learning Features */}
         <button
           onClick={() => onTabChange('summarize')}
@@ -402,7 +435,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           }`}
         >
           <Calendar className="w-3.5 h-3.5" />
-          <span>Work & Study Planner</span>
+          <span>Work &amp; Study Planner</span>
         </button>
 
         <button
@@ -414,7 +447,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           }`}
         >
           <CalendarDays className="w-3.5 h-3.5" />
-          <span>Today's Plan</span>
+          <span>Today&apos;s Plan</span>
         </button>
 
         <button
@@ -442,7 +475,233 @@ export const Navbar: React.FC<NavbarProps> = ({
           <TrendingUp className="w-3.5 h-3.5" />
           <span>My Progress</span>
         </button>
-      </div>
+      </nav>
+
+      {/* Mobile Compact 3-Column x 2-Row Navigation Grid (Zero Horizontal Scrolling) */}
+      <nav
+        aria-label="Mobile quick navigation"
+        className="md:hidden border-t border-slate-100 bg-slate-50/90 px-2.5 py-2"
+      >
+        <div className="grid grid-cols-3 gap-1.5">
+          {/* Row 1, Col 1: Home */}
+          <button
+            type="button"
+            onClick={() => {
+              setShowMobileMore(false);
+              setMobileHomeActive(true);
+              if (onGoHome) {
+                onGoHome();
+              } else {
+                onTabChange('summarize');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }
+            }}
+            className={`min-h-[48px] px-1.5 py-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-all cursor-pointer border ${
+              mobileHomeActive && currentTab === 'summarize' && !showMobileMore
+                ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
+                : 'bg-white text-slate-700 border-slate-200/80 hover:bg-slate-100'
+            }`}
+          >
+            <Home className="w-4 h-4 shrink-0" />
+            <span className="leading-tight truncate max-w-full">Home</span>
+          </button>
+
+          {/* Row 1, Col 2: Lessons */}
+          <button
+            type="button"
+            onClick={() => navigateMobile('summarize', { scrollToContent: true })}
+            className={`min-h-[48px] px-1.5 py-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-all cursor-pointer border ${
+              !mobileHomeActive && currentTab === 'summarize' && !showMobileMore
+                ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
+                : 'bg-white text-slate-700 border-slate-200/80 hover:bg-slate-100'
+            }`}
+          >
+            <BookOpen className="w-4 h-4 shrink-0" />
+            <span className="leading-tight truncate max-w-full">Lessons</span>
+          </button>
+
+          {/* Row 1, Col 3: Quiz */}
+          <button
+            type="button"
+            onClick={() =>
+              navigateMobile('quiz', { scrollToContent: true, quizSubTab: 'practice_exam' })
+            }
+            className={`min-h-[48px] px-1.5 py-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-all cursor-pointer border ${
+              currentTab === 'quiz' && activeQuizSubTab === 'practice_exam' && !showMobileMore
+                ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
+                : 'bg-white text-slate-700 border-slate-200/80 hover:bg-slate-100'
+            }`}
+          >
+            <Sparkles className="w-4 h-4 shrink-0" />
+            <span className="leading-tight truncate max-w-full">Quiz</span>
+          </button>
+
+          {/* Row 2, Col 1: AI Tutor */}
+          <button
+            type="button"
+            onClick={() => navigateMobile('tutor', { scrollToContent: true })}
+            className={`min-h-[48px] px-1.5 py-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-all cursor-pointer border ${
+              currentTab === 'tutor' && !showMobileMore
+                ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
+                : 'bg-white text-slate-700 border-slate-200/80 hover:bg-slate-100'
+            }`}
+          >
+            <HelpCircle className="w-4 h-4 shrink-0" />
+            <span className="leading-tight truncate max-w-full">AI Tutor</span>
+          </button>
+
+          {/* Row 2, Col 2: Planner */}
+          <button
+            type="button"
+            onClick={() => navigateMobile('planner', { scrollToContent: true })}
+            className={`min-h-[48px] px-1.5 py-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-all cursor-pointer border ${
+              currentTab === 'planner' && !showMobileMore
+                ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
+                : 'bg-white text-slate-700 border-slate-200/80 hover:bg-slate-100'
+            }`}
+          >
+            <Calendar className="w-4 h-4 shrink-0" />
+            <span className="leading-tight truncate max-w-full">Planner</span>
+          </button>
+
+          {/* Row 2, Col 3: More */}
+          <button
+            type="button"
+            aria-expanded={showMobileMore}
+            onClick={() => setShowMobileMore((prev) => !prev)}
+            className={`min-h-[48px] px-1.5 py-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-all cursor-pointer border ${
+              showMobileMore || isMoreSectionActive
+                ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
+                : 'bg-white text-slate-700 border-slate-200/80 hover:bg-slate-100'
+            }`}
+          >
+            {showMobileMore ? (
+              <X className="w-4 h-4 shrink-0" />
+            ) : (
+              <LayoutGrid className="w-4 h-4 shrink-0" />
+            )}
+            <span className="leading-tight truncate max-w-full">More</span>
+          </button>
+        </div>
+
+        {/* Expandable Secondary Features Menu under "More" */}
+        {showMobileMore && (
+          <div className="mt-2 p-2 bg-white rounded-2xl border border-slate-200 shadow-md animate-fadeIn">
+            <div className="grid grid-cols-2 gap-1.5 text-xs">
+              <button
+                type="button"
+                onClick={() =>
+                  navigateMobile('quiz', { scrollToContent: true, quizSubTab: 'flashcards' })
+                }
+                className={`min-h-[44px] px-2.5 py-2 rounded-xl flex items-center space-x-2 font-semibold text-left border transition-colors cursor-pointer ${
+                  currentTab === 'quiz' && activeQuizSubTab === 'flashcards'
+                    ? 'bg-sky-50 text-sky-900 border-sky-300 font-bold'
+                    : 'bg-slate-50 text-slate-700 border-slate-200/70 hover:bg-slate-100'
+                }`}
+              >
+                <Layers className="w-4 h-4 text-sky-600 shrink-0" />
+                <span className="truncate">Flashcards</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  navigateMobile('quiz', { scrollToContent: true, quizSubTab: 'memorization' })
+                }
+                className={`min-h-[44px] px-2.5 py-2 rounded-xl flex items-center space-x-2 font-semibold text-left border transition-colors cursor-pointer ${
+                  currentTab === 'quiz' && activeQuizSubTab === 'memorization'
+                    ? 'bg-sky-50 text-sky-900 border-sky-300 font-bold'
+                    : 'bg-slate-50 text-slate-700 border-slate-200/70 hover:bg-slate-100'
+                }`}
+              >
+                <Brain className="w-4 h-4 text-indigo-600 shrink-0" />
+                <span className="truncate">Reviewers</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => navigateMobile('today', { scrollToContent: true })}
+                className={`min-h-[44px] px-2.5 py-2 rounded-xl flex items-center space-x-2 font-semibold text-left border transition-colors cursor-pointer ${
+                  currentTab === 'today'
+                    ? 'bg-sky-50 text-sky-900 border-sky-300 font-bold'
+                    : 'bg-slate-50 text-slate-700 border-slate-200/70 hover:bg-slate-100'
+                }`}
+              >
+                <CalendarDays className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span className="truncate">Today&apos;s Plan</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => navigateMobile('timer', { scrollToContent: true })}
+                className={`min-h-[44px] px-2.5 py-2 rounded-xl flex items-center space-x-2 font-semibold text-left border transition-colors cursor-pointer ${
+                  currentTab === 'timer'
+                    ? 'bg-sky-50 text-sky-900 border-sky-300 font-bold'
+                    : 'bg-slate-50 text-slate-700 border-slate-200/70 hover:bg-slate-100'
+                }`}
+              >
+                <Timer className="w-4 h-4 text-amber-600 shrink-0" />
+                <span className="truncate">Focus Timer</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => navigateMobile('progress', { scrollToContent: true })}
+                className={`min-h-[44px] px-2.5 py-2 rounded-xl flex items-center space-x-2 font-semibold text-left border transition-colors cursor-pointer ${
+                  currentTab === 'progress'
+                    ? 'bg-sky-50 text-sky-900 border-sky-300 font-bold'
+                    : 'bg-slate-50 text-slate-700 border-slate-200/70 hover:bg-slate-100'
+                }`}
+              >
+                <TrendingUp className="w-4 h-4 text-purple-600 shrink-0" />
+                <span className="truncate">Study History</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setShowMobileMore(false);
+                  onOpenUpload();
+                }}
+                className="min-h-[44px] px-2.5 py-2 rounded-xl flex items-center space-x-2 font-semibold text-left border bg-sky-50/70 text-sky-900 border-sky-200 hover:bg-sky-100 transition-colors cursor-pointer"
+              >
+                <Upload className="w-4 h-4 text-sky-700 shrink-0" />
+                <span className="truncate">Upload Material</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setShowMobileMore(false);
+                  if (isLoggedIn && !isDemoMode && onOpenAccountModal) {
+                    onOpenAccountModal();
+                  } else {
+                    onOpenAuth();
+                  }
+                }}
+                className="min-h-[44px] px-2.5 py-2 rounded-xl flex items-center space-x-2 font-semibold text-left border bg-slate-50 text-slate-700 border-slate-200/70 hover:bg-slate-100 transition-colors cursor-pointer"
+              >
+                <User className="w-4 h-4 text-slate-600 shrink-0" />
+                <span className="truncate">Account</span>
+              </button>
+
+              {onOpenTutorial && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowMobileMore(false);
+                    onOpenTutorial();
+                  }}
+                  className="min-h-[44px] px-2.5 py-2 rounded-xl flex items-center space-x-2 font-semibold text-left border bg-emerald-50/70 text-emerald-900 border-emerald-200 hover:bg-emerald-100 transition-colors cursor-pointer"
+                >
+                  <Compass className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span className="truncate">Help &amp; Guide</span>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </nav>
     </header>
   );
 };

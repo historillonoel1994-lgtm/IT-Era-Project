@@ -51,10 +51,13 @@ import {
 } from '../types';
 import {
   generateSelfReviewer,
+  gradeQuizSubmission,
   analyzeDocumentChapters,
   generateFlashcards,
   generateConceptContrasts,
 } from '../services/api';
+import { gradeQuizAnswer } from '../../lib/quizGrader';
+import { formatDateTime12Hour } from '../utils/timeFormat';
 import {
   saveReviewerAttempt,
   saveQuizResult,
@@ -85,6 +88,8 @@ interface GenerateQuizViewProps {
   onNavigateToSummary: () => void;
   onOpenUpload: () => void;
   onNavigateToProgress: () => void;
+  initialSubTab?: 'practice_exam' | 'flashcards' | 'contrasts' | 'memorization';
+  subTabTrigger?: number;
 }
 
 export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
@@ -94,14 +99,22 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
   onNavigateToSummary,
   onOpenUpload,
   onNavigateToProgress,
+  initialSubTab,
+  subTabTrigger,
 }) => {
   const isSavingQuizRef = useRef(false);
 
-  // Reviewer Sub-Navigation Tabs matching Screenshot 1:
+  // Reviewer Sub-Navigation Tabs:
   // ✂ Concept Contrasts | 📚 Flashcards | 🧠 Memorization (L1-L5) | ✨ Practice Exam
   const [activeReviewerTab, setActiveReviewerTab] = useState<
     'practice_exam' | 'flashcards' | 'contrasts' | 'memorization'
-  >('practice_exam');
+  >(initialSubTab || 'practice_exam');
+
+  useEffect(() => {
+    if (initialSubTab) {
+      setActiveReviewerTab(initialSubTab);
+    }
+  }, [initialSubTab, subTabTrigger]);
 
   // Search input state (Screenshot 1 top bar)
   const [searchQuery, setSearchQuery] = useState('');
@@ -120,8 +133,8 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
   const [selectedChapterIds, setSelectedChapterIds] = useState<string[]>(['all']);
   const [isAnalyzingChapters, setIsAnalyzingChapters] = useState<boolean>(false);
 
-  // 3. NUMBER OF QUESTIONS (Default: 20 Questions)
-  const [questionCount, setQuestionCount] = useState<10 | 20 | 30 | 50 | 100>(20);
+  // 3. NUMBER OF QUESTIONS (Supports 10, 25, 50, 100)
+  const [questionCount, setQuestionCount] = useState<10 | 25 | 50 | 100>(10);
 
   // 4. DIFFICULTY LEVEL (Default: Medium)
   const [difficulty, setDifficulty] = useState<ReviewerDifficulty>('medium');
@@ -143,6 +156,14 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
   const [userAnswers, setUserAnswers] = useState<ReviewerUserAnswer[]>([]);
   const [finalResult, setFinalResult] = useState<ReviewerAttempt | null>(null);
   const [isPracticingMistakes, setIsPracticingMistakes] = useState<boolean>(false);
+  const [generationProgress, setGenerationProgress] = useState<{
+    generated: number;
+    target: number;
+    batch: number;
+    totalBatches: number;
+    statusText: string;
+  } | null>(null);
+  const [generationWarning, setGenerationWarning] = useState<string | null>(null);
 
   // Status & Error
   const [error, setError] = useState<string | null>(null);
@@ -396,11 +417,34 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
     }
   };
 
-  // GENERATE & START QUIZ HANDLER
+  // Helper to determine whether a question uses free-text input vs multiple-choice buttons
+  const isTextInputQuestion = (q: ReviewerQuestion): boolean => {
+    if (
+      q.type === 'fill_in_the_blank' ||
+      q.type === 'identification' ||
+      q.type === 'short_answer'
+    ) {
+      return true;
+    }
+    if (q.type === 'multiple_choice' || q.type === 'true_false') {
+      return false;
+    }
+    return !q.options || q.options.length === 0;
+  };
+
+  // GENERATE & START QUIZ HANDLER (Batched generation supporting 10, 25, 50, 100 unique questions with live progress & retries)
   const handleStartQuiz = async () => {
     setStage('loading');
     setError(null);
     setInsufficientNotice(null);
+    setGenerationWarning(null);
+    setGenerationProgress({
+      generated: 0,
+      target: questionCount,
+      batch: 1,
+      totalBatches: Math.max(1, Math.ceil(questionCount / 20)),
+      statusText: 'Preparing full lesson content...',
+    });
 
     try {
       // Gather pages from target lesson (or multi-doc if enabled)
@@ -446,34 +490,120 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
             .map((id) => detectedChapters.find((c) => c.id === id)?.title || id)
             .join(', ');
 
-      const res = await generateSelfReviewer({
-        pages: targetPages,
-        lessonTitle: currentTargetLesson.title,
-        chapterId: chapterScopeLabel,
-        startPage,
-        endPage,
-        questionCount,
-        difficulty,
-        questionTypes,
-        lessonId: currentTargetLesson.id,
-        documentId: currentTargetLesson.id,
-        filename: currentTargetLesson.fileName,
+      // Split into frontend-visible batches for responsive progress & to avoid AI output truncation
+      const FRONTEND_BATCH_SIZE = questionCount <= 15 ? questionCount : 20;
+      const plannedBatches = Math.max(1, Math.ceil(questionCount / FRONTEND_BATCH_SIZE));
+      const maxAttempts = plannedBatches + 2; // Up to 2 bounded top-up retries for missing questions
+
+      const collected: ReviewerQuestion[] = [];
+      const seenStems = new Set<string>();
+      let consecutiveNoNew = 0;
+      let lastIncompleteReason: string | undefined;
+
+      const normalizeStem = (s: string) =>
+        String(s || '')
+          .toLowerCase()
+          .replace(/[^a-z0-9\s]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+      for (let attemptIdx = 0; attemptIdx < maxAttempts && collected.length < questionCount; attemptIdx++) {
+        const remaining = questionCount - collected.length;
+        const batchCount = Math.min(FRONTEND_BATCH_SIZE, remaining);
+        const isRetryBatch = attemptIdx >= plannedBatches;
+
+        setGenerationProgress({
+          generated: collected.length,
+          target: questionCount,
+          batch: Math.min(attemptIdx + 1, plannedBatches),
+          totalBatches: plannedBatches,
+          statusText: isRetryBatch
+            ? `Fetching ${remaining} remaining unique question${remaining === 1 ? '' : 's'} (retry ${attemptIdx - plannedBatches + 1})...`
+            : `Generating batch ${attemptIdx + 1} of ${plannedBatches} (${collected.length}/${questionCount} ready)...`,
+        });
+
+        const res = await generateSelfReviewer({
+          pages: targetPages,
+          lessonTitle: currentTargetLesson.title,
+          chapterId: chapterScopeLabel,
+          startPage,
+          endPage,
+          questionCount: batchCount,
+          difficulty,
+          questionTypes,
+          excludeQuestions: collected.map((q) => q.question).slice(-80),
+          batchIndex: attemptIdx,
+          totalBatches: plannedBatches,
+          lessonId: currentTargetLesson.id,
+          documentId: currentTargetLesson.id,
+          filename: currentTargetLesson.fileName,
+        });
+
+        if (!res.success && res.insufficient && collected.length === 0) {
+          setInsufficientNotice(
+            res.message ||
+              `Insufficient content in selected section for ${questionCount} questions. Please select more chapters or reduce the question count.`
+          );
+          setGenerationProgress(null);
+          setStage('setup');
+          return;
+        }
+
+        if (res.incompleteReason) {
+          lastIncompleteReason = res.incompleteReason;
+        }
+
+        const batchQuestions = Array.isArray(res.questions) ? res.questions : [];
+        let added = 0;
+        for (const q of batchQuestions) {
+          if (collected.length >= questionCount) break;
+          if (!q?.question || !q?.correctAnswer) continue;
+          const stem = normalizeStem(q.question);
+          if (!stem || seenStems.has(stem)) continue;
+          seenStems.add(stem);
+          collected.push({
+            ...q,
+            id: `rq-${collected.length + 1}`,
+          });
+          added++;
+        }
+
+        if (added === 0) {
+          consecutiveNoNew++;
+          if (consecutiveNoNew >= 2) break;
+        } else {
+          consecutiveNoNew = 0;
+        }
+      }
+
+      if (collected.length === 0) {
+        throw new Error('No questions could be generated from the selected scope. Please try again.');
+      }
+
+      const numberedQuestions = collected.map((q, idx) => ({
+        ...q,
+        id: `rq-${idx + 1}`,
+      }));
+
+      setGenerationProgress({
+        generated: numberedQuestions.length,
+        target: questionCount,
+        batch: plannedBatches,
+        totalBatches: plannedBatches,
+        statusText: `Verified ${numberedQuestions.length} of ${questionCount} questions.`,
       });
 
-      if (!res.success && res.insufficient) {
-        setInsufficientNotice(
-          res.message ||
-            `Insufficient content in selected section for ${questionCount} questions. Please select more chapters or reduce the question count.`
+      // Never silently hide a shortfall — clearly report incomplete generation to the student
+      if (numberedQuestions.length < questionCount) {
+        setGenerationWarning(
+          lastIncompleteReason ||
+            `Only ${numberedQuestions.length} of ${questionCount} requested unique questions could be generated from the available lesson material without repeating facts.`
         );
-        setStage('setup');
-        return;
+      } else {
+        setGenerationWarning(null);
       }
 
-      if (!res.questions || res.questions.length === 0) {
-        throw new Error('No questions could be generated from the selected scope.');
-      }
-
-      setQuestions(res.questions);
+      setQuestions(numberedQuestions);
       setCurrentIdx(0);
       setUserAnswers([]);
       setSelectedOption(null);
@@ -481,49 +611,45 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
       setShowActiveRecallOptions(false);
       setIsAnswerSubmitted(false);
       setIsPracticingMistakes(false);
+      setGenerationProgress(null);
       setStage('active');
     } catch (err: any) {
       console.error('Quiz generation error:', err);
       setError(err.message || 'Failed to generate quiz. Please check your connection and try again.');
+      setGenerationProgress(null);
       setStage('setup');
     }
   };
 
-  // Submit answer for active question
-  const handleSubmitAnswer = () => {
+  // Submit answer for active question using strict deterministic grading (never marks wrong/blank/partial answers correct)
+  const handleSubmitAnswer = (allowBlankSkip = false) => {
     const currentQ = questions[currentIdx];
+    const textInputMode = isTextInputQuestion(currentQ);
     let submittedAnswer = '';
 
-    if (currentQ.type === 'multiple_choice' || currentQ.type === 'true_false') {
-      if (!selectedOption) return;
-      submittedAnswer = selectedOption.trim();
+    if (!textInputMode) {
+      if (!selectedOption && !allowBlankSkip) return;
+      submittedAnswer = (selectedOption || '').trim();
     } else {
-      if (!userTextAnswer.trim()) return;
+      if (!userTextAnswer.trim() && !allowBlankSkip) return;
       submittedAnswer = userTextAnswer.trim();
     }
 
-    const normSubmitted = submittedAnswer.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const normCorrect = (currentQ.correctAnswer || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-
-    let isCorrect = false;
-    if (currentQ.type === 'multiple_choice' || currentQ.type === 'true_false') {
-      isCorrect = submittedAnswer.toLowerCase() === currentQ.correctAnswer.toLowerCase();
-    } else if (currentQ.type === 'short_answer') {
-      // Short answer assesses meaning: check keywords or core concept match
-      const words = normCorrect.split(/\s+/).filter((w) => w.length > 3);
-      const matched = words.filter((w) => normSubmitted.includes(w));
-      isCorrect = matched.length >= Math.min(2, words.length) || normSubmitted.includes(normCorrect) || normCorrect.includes(normSubmitted);
-    } else {
-      // Identification / Fill in the blank: exact or core substring match
-      isCorrect = normSubmitted === normCorrect || normSubmitted.includes(normCorrect) || normCorrect.includes(normSubmitted);
-    }
+    const gradeResult = gradeQuizAnswer(
+      {
+        type: currentQ.type,
+        correctAnswer: currentQ.correctAnswer,
+        acceptedAnswers: currentQ.acceptedAnswers,
+      },
+      submittedAnswer
+    );
 
     const record: ReviewerUserAnswer = {
-      questionId: currentQ.id || `q-${currentIdx}`,
+      questionId: currentQ.id || `rq-${currentIdx + 1}`,
       question: currentQ.question,
-      userAnswer: submittedAnswer,
+      userAnswer: submittedAnswer || '(No answer submitted)',
       correctAnswer: currentQ.correctAnswer,
-      isCorrect,
+      isCorrect: gradeResult.isCorrect,
       explanation: currentQ.explanation,
       sourcePage: currentQ.sourcePage,
       chapterOrSection: currentQ.chapterOrSection,
@@ -531,32 +657,112 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
       isSupplementary: currentQ.isSupplementary,
     };
 
-    setUserAnswers([...userAnswers, record]);
+    setUserAnswers((prev) => {
+      const next = [...prev];
+      const existingIdx = next.findIndex((a) => a.questionId === record.questionId);
+      if (existingIdx >= 0) {
+        next[existingIdx] = record;
+      } else {
+        next.push(record);
+      }
+      return next;
+    });
     setIsAnswerSubmitted(true);
   };
 
   // Move to next question or complete exam
   const handleNextQuestion = () => {
     if (currentIdx < questions.length - 1) {
-      setCurrentIdx(currentIdx + 1);
-      setSelectedOption(null);
-      setUserTextAnswer('');
+      const nextIndex = currentIdx + 1;
+      setCurrentIdx(nextIndex);
+      const nextQ = questions[nextIndex];
+      const existingAns = userAnswers.find((a) => a.questionId === (nextQ.id || `rq-${nextIndex + 1}`));
+      if (existingAns) {
+        setSelectedOption(existingAns.userAnswer === '(No answer submitted)' ? null : existingAns.userAnswer);
+        setUserTextAnswer(existingAns.userAnswer === '(No answer submitted)' ? '' : existingAns.userAnswer);
+        setIsAnswerSubmitted(true);
+      } else {
+        setSelectedOption(null);
+        setUserTextAnswer('');
+        setIsAnswerSubmitted(false);
+      }
       setShowActiveRecallOptions(false);
-      setIsAnswerSubmitted(false);
     } else {
       finishExam(userAnswers);
     }
   };
 
-  // Complete exam and record in Supabase
+  // Jump directly to any question (1..100) cleanly
+  const handleJumpToQuestion = (targetIdx: number) => {
+    if (targetIdx < 0 || targetIdx >= questions.length) return;
+    setCurrentIdx(targetIdx);
+    const targetQ = questions[targetIdx];
+    const existingAns = userAnswers.find((a) => a.questionId === (targetQ.id || `rq-${targetIdx + 1}`));
+    if (existingAns) {
+      setSelectedOption(existingAns.userAnswer === '(No answer submitted)' ? null : existingAns.userAnswer);
+      setUserTextAnswer(existingAns.userAnswer === '(No answer submitted)' ? '' : existingAns.userAnswer);
+      setIsAnswerSubmitted(true);
+    } else {
+      setSelectedOption(null);
+      setUserTextAnswer('');
+      setIsAnswerSubmitted(false);
+    }
+    setShowActiveRecallOptions(false);
+  };
+
+  // Complete exam with server-side score validation and record in Supabase
   const finishExam = async (completedAnswers: ReviewerUserAnswer[]) => {
     if (isSavingQuizRef.current) return;
     isSavingQuizRef.current = true;
 
-    const total = completedAnswers.length;
-    const correctCount = completedAnswers.filter((a) => a.isCorrect).length;
+    // Ensure every question in the exam has an entry (unanswered items are explicitly marked incorrect)
+    const answerLookup = new Map(completedAnswers.map((a) => [a.questionId, a]));
+    let verifiedAnswers: ReviewerUserAnswer[] = questions.map((q, idx) => {
+      const qId = q.id || `rq-${idx + 1}`;
+      const existing = answerLookup.get(qId);
+      const rawSubmitted = existing && existing.userAnswer !== '(No answer submitted)' ? existing.userAnswer : '';
+      const localCheck = gradeQuizAnswer(
+        { type: q.type, correctAnswer: q.correctAnswer, acceptedAnswers: q.acceptedAnswers },
+        rawSubmitted
+      );
+      return {
+        questionId: qId,
+        question: q.question,
+        userAnswer: rawSubmitted || '(No answer submitted)',
+        correctAnswer: q.correctAnswer,
+        isCorrect: localCheck.isCorrect,
+        explanation: q.explanation,
+        sourcePage: q.sourcePage,
+        chapterOrSection: q.chapterOrSection,
+        citationExcerpt: q.citationExcerpt,
+        isSupplementary: q.isSupplementary,
+      };
+    });
+
+    // Server-side validation of final score & per-question grading before persistence
+    try {
+      const serverGrade = await gradeQuizSubmission(
+        questions,
+        verifiedAnswers.map((a) => ({
+          questionId: a.questionId,
+          userAnswer: a.userAnswer === '(No answer submitted)' ? '' : a.userAnswer,
+        }))
+      );
+      if (serverGrade?.success && Array.isArray(serverGrade.gradedAnswers)) {
+        const serverMap = new Map(serverGrade.gradedAnswers.map((g) => [g.questionId, g]));
+        verifiedAnswers = verifiedAnswers.map((ans) => {
+          const sg = serverMap.get(ans.questionId);
+          return sg ? { ...ans, isCorrect: sg.isCorrect } : ans;
+        });
+      }
+    } catch (gradeErr) {
+      console.warn('Server quiz grade validation fallback to deterministic local grader:', gradeErr);
+    }
+
+    const total = verifiedAnswers.length;
+    const correctCount = verifiedAnswers.filter((a) => a.isCorrect).length;
     const percentage = total > 0 ? Math.round((correctCount / total) * 100) : 0;
-    const questionsToReview = completedAnswers.filter((a) => !a.isCorrect);
+    const questionsToReview = verifiedAnswers.filter((a) => !a.isCorrect);
 
     const topicSet = new Set<string>();
     questionsToReview.forEach((q) => {
@@ -575,7 +781,7 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
       score: correctCount,
       percentage,
       completedAt: new Date().toISOString(),
-      answers: completedAnswers,
+      answers: verifiedAnswers,
       questionsToReview,
       topicsToReview,
     };
@@ -592,7 +798,7 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
       totalQuestions: attempt.questionCount,
       score: attempt.score,
       percentage: attempt.percentage,
-      answers: completedAnswers.map((a) => ({
+      answers: verifiedAnswers.map((a) => ({
         ...a,
         topic: a.chapterOrSection || 'Lesson Concept',
       })),
@@ -1097,8 +1303,8 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
                     </span>
                   </div>
 
-                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
-                    {([10, 20, 30, 50, 100] as const).map((cnt) => {
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                    {([10, 25, 50, 100] as const).map((cnt) => {
                       const isSelected = questionCount === cnt;
                       return (
                         <button
@@ -1116,9 +1322,17 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
                             <span className="text-[10px] text-amber-300 font-bold block">
                               Ultimate Mock
                             </span>
+                          ) : cnt === 50 ? (
+                            <span className="text-[10px] opacity-80 block font-semibold">
+                              Full Reviewer
+                            </span>
+                          ) : cnt === 25 ? (
+                            <span className="text-[10px] opacity-75 block font-medium">
+                              Extended Quiz
+                            </span>
                           ) : (
                             <span className="text-[10px] opacity-70 block font-medium">
-                              Standard Review
+                              Quick Review
                             </span>
                           )}
                         </button>
@@ -1393,263 +1607,353 @@ export const GenerateQuizView: React.FC<GenerateQuizViewProps> = ({
             </div>
           )}
 
-          {/* LOADING STAGE */}
+          {/* LOADING STAGE WITH LIVE BATCH PROGRESS */}
           {stage === 'loading' && (
-            <div className="bg-white rounded-3xl border border-slate-200/80 p-12 text-center shadow-sm space-y-4 max-w-xl mx-auto">
+            <div className="bg-white rounded-3xl border border-slate-200/80 p-6 sm:p-10 text-center shadow-sm space-y-5 max-w-xl mx-auto">
               <div className="inline-flex p-4 bg-sky-50 text-sky-700 rounded-3xl animate-spin">
                 <Loader2 className="w-8 h-8" />
               </div>
-              <div className="space-y-1">
-                <h3 className="text-lg font-black text-slate-900">
+              <div className="space-y-1.5">
+                <h3 className="text-base sm:text-lg font-black text-slate-900">
                   Synthesizing {questionCount} College-Level Questions
                 </h3>
                 <p className="text-xs text-slate-500 max-w-sm mx-auto leading-relaxed">
-                  Strictly indexing {currentTargetLesson.title} across Chapter Scope. Verifying textbook page citations and generating explanations.
+                  {generationProgress?.statusText ||
+                    `Strictly indexing ${currentTargetLesson.title} across Chapter Scope. Verifying textbook page citations and generating explanations.`}
                 </p>
               </div>
+              {generationProgress && (
+                <div className="max-w-sm mx-auto space-y-2 pt-1">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-600">
+                    <span>
+                      Batch {generationProgress.batch} of {generationProgress.totalBatches}
+                    </span>
+                    <span className="text-sky-700">
+                      {generationProgress.generated} / {generationProgress.target} ready
+                    </span>
+                  </div>
+                  <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden border border-slate-200/70">
+                    <div
+                      className="h-full bg-gradient-to-r from-sky-600 to-indigo-700 rounded-full transition-all duration-300"
+                      style={{
+                        width: `${Math.max(
+                          8,
+                          Math.min(100, Math.round((generationProgress.generated / Math.max(1, generationProgress.target)) * 100))
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
           {/* ACTIVE EXAM TAKING STAGE */}
-          {stage === 'active' && questions.length > 0 && (
-            <div className="bg-white rounded-3xl border border-slate-200/80 p-6 sm:p-8 shadow-sm space-y-6 max-w-3xl mx-auto">
-              {/* Progress & Chapter Header */}
-              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                <div className="space-y-0.5">
-                  <div className="flex items-center space-x-2">
-                    <span className="text-[10px] font-black uppercase tracking-wider bg-slate-900 text-white px-2.5 py-0.5 rounded-full">
-                      Question {currentIdx + 1} of {questions.length}
-                    </span>
-                    <span className="text-xs font-bold text-sky-800 bg-sky-50 px-2 py-0.5 rounded">
-                      {questions[currentIdx].difficulty?.toUpperCase()}
-                    </span>
-                    {isPracticingMistakes && (
-                      <span className="text-[10px] font-bold uppercase bg-amber-100 text-amber-900 px-2 py-0.5 rounded">
-                        Targeted Revision
+          {stage === 'active' && questions.length > 0 && (() => {
+            const currentQ = questions[currentIdx];
+            const currentQId = currentQ.id || `rq-${currentIdx + 1}`;
+            const currentAnswerRecord = userAnswers.find((a) => a.questionId === currentQId);
+            const textInputMode = isTextInputQuestion(currentQ);
+            const answeredCount = userAnswers.length;
+
+            return (
+              <div className="bg-white rounded-3xl border border-slate-200/80 p-4 sm:p-8 shadow-sm space-y-5 max-w-3xl mx-auto">
+                {/* Incomplete Generation Warning Banner (never silently hides fewer questions) */}
+                {generationWarning && (
+                  <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-2xl text-xs text-amber-900 flex items-start space-x-2.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-bold block">Partial Question Count Notice</span>
+                      <p className="text-amber-800 mt-0.5">{generationWarning}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Progress & Chapter Header */}
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[10px] font-black uppercase tracking-wider bg-slate-900 text-white px-2.5 py-0.5 rounded-full">
+                        Question {currentIdx + 1} of {questions.length}
                       </span>
+                      <span className="text-[11px] font-bold text-sky-800 bg-sky-50 px-2 py-0.5 rounded">
+                        {currentQ.difficulty?.toUpperCase()}
+                      </span>
+                      <span className="text-[11px] font-semibold text-slate-500">
+                        ({answeredCount}/{questions.length} answered)
+                      </span>
+                      {isPracticingMistakes && (
+                        <span className="text-[10px] font-bold uppercase bg-amber-100 text-amber-900 px-2 py-0.5 rounded">
+                          Targeted Revision
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs text-slate-400 block pt-0.5 truncate">
+                      {currentQ.chapterOrSection || 'Lesson Concept'}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {questions.length > 10 && (
+                      <select
+                        aria-label="Jump to question number"
+                        value={currentIdx}
+                        onChange={(e) => handleJumpToQuestion(Number(e.target.value))}
+                        className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 cursor-pointer"
+                      >
+                        {questions.map((qItem, qIdx) => {
+                          const ansRec = userAnswers.find((a) => a.questionId === (qItem.id || `rq-${qIdx + 1}`));
+                          const marker = ansRec ? (ansRec.isCorrect ? '✓' : '✗') : '•';
+                          return (
+                            <option key={qIdx} value={qIdx}>
+                              {marker} Q{qIdx + 1}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => openInspector(currentQ.sourcePage, currentQ.citationExcerpt)}
+                      className="px-3 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 rounded-xl text-xs font-bold flex items-center space-x-1.5 transition-colors cursor-pointer"
+                    >
+                      <BookOpen className="w-3.5 h-3.5" />
+                      <span>Page {currentQ.sourcePage}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Progress Bar */}
+                <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-sky-600 to-indigo-700 transition-all duration-300"
+                    style={{ width: `${Math.round(((currentIdx + 1) / questions.length) * 100)}%` }}
+                  />
+                </div>
+
+                {/* Question Text */}
+                <div className="space-y-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                    FORMAT: {currentQ.type?.replace(/_/g, ' ').toUpperCase()}
+                  </span>
+                  <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-snug break-words">
+                    {currentIdx + 1}. {currentQ.question}
+                  </h3>
+                </div>
+
+                {/* INTERACTIVE INPUT BY QUESTION TYPE */}
+                {/* 1. Multiple Choice / True or False */}
+                {!textInputMode && (
+                  <div className="space-y-3">
+                    {quizMode === 'active_recall' && !showActiveRecallOptions && !isAnswerSubmitted ? (
+                      <div className="p-4 bg-purple-50 border border-purple-200 rounded-2xl text-center space-y-3">
+                        <span className="text-xs font-bold text-purple-900 block">
+                          🧠 Active Recall Shield Active
+                        </span>
+                        <p className="text-xs text-purple-700">
+                          Recall the answer mentally or write it down first before revealing the choices:
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setShowActiveRecallOptions(true)}
+                          className="px-4 py-2 bg-purple-700 hover:bg-purple-800 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-xs"
+                        >
+                          Reveal Answer Choices
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 gap-2.5">
+                        {(currentQ.options && currentQ.options.length > 0 ? currentQ.options : ['True', 'False']).map(
+                          (opt, optIdx) => {
+                            const letter = String.fromCharCode(65 + optIdx);
+                            const isSelected = selectedOption === opt;
+                            const isCorrectOption =
+                              opt.trim().toLowerCase() === currentQ.correctAnswer.trim().toLowerCase();
+
+                            let buttonStyle =
+                              'border-slate-200 hover:border-slate-300 bg-white text-slate-800';
+                            if (isAnswerSubmitted) {
+                              if (isCorrectOption) {
+                                buttonStyle =
+                                  'border-emerald-500 bg-emerald-50/90 text-emerald-950 font-bold';
+                              } else if (isSelected) {
+                                buttonStyle = 'border-red-500 bg-red-50/90 text-red-950 font-bold';
+                              } else {
+                                buttonStyle = 'border-slate-200 bg-slate-50 text-slate-400 opacity-60';
+                              }
+                            } else if (isSelected) {
+                              buttonStyle =
+                                'border-slate-900 bg-slate-900 text-white font-bold shadow-md';
+                            }
+
+                            return (
+                              <button
+                                key={optIdx}
+                                type="button"
+                                disabled={isAnswerSubmitted}
+                                onClick={() => setSelectedOption(opt)}
+                                className={`p-3.5 rounded-2xl border text-left flex items-start space-x-3 transition-all cursor-pointer ${buttonStyle}`}
+                              >
+                                <span
+                                  className={`w-6 h-6 rounded-lg flex items-center justify-center text-xs font-extrabold shrink-0 ${
+                                    isSelected && !isAnswerSubmitted
+                                      ? 'bg-white text-slate-900'
+                                      : 'bg-slate-100 text-slate-700'
+                                  }`}
+                                >
+                                  {letter}
+                                </span>
+                                <span className="text-xs sm:text-sm font-medium leading-relaxed pt-0.5 break-words">
+                                  {opt}
+                                </span>
+                              </button>
+                            );
+                          }
+                        )}
+                      </div>
                     )}
                   </div>
-                  <span className="text-xs text-slate-400 block pt-0.5">
-                    {questions[currentIdx].chapterOrSection || 'Lesson Concept'}
-                  </span>
-                </div>
+                )}
 
-                <button
-                  type="button"
-                  onClick={() =>
-                    openInspector(
-                      questions[currentIdx].sourcePage,
-                      questions[currentIdx].citationExcerpt
-                    )
-                  }
-                  className="px-3 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 rounded-xl text-xs font-bold flex items-center space-x-1.5 transition-colors cursor-pointer"
-                >
-                  <BookOpen className="w-3.5 h-3.5" />
-                  <span>Page {questions[currentIdx].sourcePage}</span>
-                </button>
-              </div>
-
-              {/* Question Text */}
-              <div className="space-y-2">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-                  FORMAT: {questions[currentIdx].type?.replace('_', ' ').toUpperCase()}
-                </span>
-                <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
-                  {questions[currentIdx].question}
-                </h3>
-              </div>
-
-              {/* INTERACTIVE INPUT BY QUESTION TYPE */}
-              {/* 1. Multiple Choice / True or False */}
-              {(questions[currentIdx].type === 'multiple_choice' ||
-                questions[currentIdx].type === 'true_false' ||
-                (questions[currentIdx].options && questions[currentIdx].options!.length > 0)) && (
-                <div className="space-y-3">
-                  {quizMode === 'active_recall' && !showActiveRecallOptions && !isAnswerSubmitted ? (
-                    <div className="p-4 bg-purple-50 border border-purple-200 rounded-2xl text-center space-y-3">
-                      <span className="text-xs font-bold text-purple-900 block">
-                        🧠 Active Recall Shield Active
-                      </span>
-                      <p className="text-xs text-purple-700">
-                        Recall the answer mentally or write it down first before revealing the choices:
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => setShowActiveRecallOptions(true)}
-                        className="px-4 py-2 bg-purple-700 hover:bg-purple-800 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-xs"
-                      >
-                        Reveal Answer Choices
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 gap-2.5">
-                      {questions[currentIdx].options?.map((opt, optIdx) => {
-                        const letter = String.fromCharCode(65 + optIdx);
-                        const isSelected = selectedOption === opt;
-                        const isCorrectOption =
-                          opt.trim().toLowerCase() ===
-                          questions[currentIdx].correctAnswer.trim().toLowerCase();
-
-                        let buttonStyle =
-                          'border-slate-200 hover:border-slate-300 bg-white text-slate-800';
-                        if (isAnswerSubmitted) {
-                          if (isCorrectOption) {
-                            buttonStyle =
-                              'border-emerald-500 bg-emerald-50/90 text-emerald-950 font-bold';
-                          } else if (isSelected) {
-                            buttonStyle = 'border-red-500 bg-red-50/90 text-red-950 font-bold';
-                          } else {
-                            buttonStyle = 'border-slate-200 bg-slate-50 text-slate-400 opacity-60';
-                          }
-                        } else if (isSelected) {
-                          buttonStyle =
-                            'border-slate-900 bg-slate-900 text-white font-bold shadow-md';
-                        }
-
-                        return (
-                          <button
-                            key={optIdx}
-                            type="button"
-                            disabled={isAnswerSubmitted}
-                            onClick={() => setSelectedOption(opt)}
-                            className={`p-3.5 rounded-2xl border text-left flex items-start space-x-3 transition-all cursor-pointer ${buttonStyle}`}
-                          >
-                            <span
-                              className={`w-6 h-6 rounded-lg flex items-center justify-center text-xs font-extrabold shrink-0 ${
-                                isSelected && !isAnswerSubmitted
-                                  ? 'bg-white text-slate-900'
-                                  : 'bg-slate-100 text-slate-700'
-                              }`}
-                            >
-                              {letter}
-                            </span>
-                            <span className="text-xs sm:text-sm font-medium leading-relaxed pt-0.5">
-                              {opt}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* 2. Fill in the Blank / Identification / Short Answer */}
-              {questions[currentIdx].type !== 'multiple_choice' &&
-                questions[currentIdx].type !== 'true_false' &&
-                (!questions[currentIdx].options || questions[currentIdx].options!.length === 0) && (
-                  <div className="space-y-3">
-                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                {/* 2. Fill in the Blank / Identification / Short Answer (Strictly typed input) */}
+                {textInputMode && (
+                  <div className="space-y-2.5">
+                    <label
+                      htmlFor="quiz-text-answer-input"
+                      className="block text-xs font-bold text-slate-700 uppercase tracking-wider"
+                    >
                       Your Answer:
                     </label>
                     <input
+                      id="quiz-text-answer-input"
                       type="text"
                       disabled={isAnswerSubmitted}
                       value={userTextAnswer}
                       onChange={(e) => setUserTextAnswer(e.target.value)}
-                      placeholder="Type the exact academic term, definition, or concept..."
-                      className="w-full p-4 bg-slate-50 border border-slate-300 rounded-2xl text-sm font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !isAnswerSubmitted && userTextAnswer.trim()) {
+                          e.preventDefault();
+                          handleSubmitAnswer(false);
+                        }
+                      }}
+                      placeholder="Type the exact missing term, name, or concept..."
+                      className="w-full p-3.5 sm:p-4 bg-slate-50 border border-slate-300 rounded-2xl text-sm font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:opacity-75"
                     />
+                    <p className="text-[11px] text-slate-500">
+                      Exact match grading (capitalization, extra spaces, and trailing punctuation are ignored).
+                    </p>
                   </div>
                 )}
 
-              {/* POST-SUBMISSION EXPLANATION & CITATION */}
-              {isAnswerSubmitted && (
-                <div
-                  className={`p-5 rounded-2xl border space-y-3 text-xs ${
-                    userAnswers[userAnswers.length - 1]?.isCorrect
-                      ? 'bg-emerald-50/80 border-emerald-200 text-emerald-950'
-                      : 'bg-red-50/80 border-red-200 text-red-950'
-                  }`}
-                >
-                  <div className="flex items-center space-x-2 font-bold text-sm">
-                    {userAnswers[userAnswers.length - 1]?.isCorrect ? (
-                      <>
-                        <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                        <span className="text-emerald-900">Correct! Excellent recall.</span>
-                      </>
-                    ) : (
-                      <>
-                        <XCircle className="w-5 h-5 text-red-600" />
-                        <span className="text-red-900">Incorrect. Review the lesson below:</span>
-                      </>
+                {/* POST-SUBMISSION EXPLANATION & CITATION */}
+                {isAnswerSubmitted && currentAnswerRecord && (
+                  <div
+                    className={`p-4 sm:p-5 rounded-2xl border space-y-3 text-xs ${
+                      currentAnswerRecord.isCorrect
+                        ? 'bg-emerald-50/80 border-emerald-200 text-emerald-950'
+                        : 'bg-red-50/80 border-red-200 text-red-950'
+                    }`}
+                  >
+                    <div className="flex items-center space-x-2 font-bold text-sm">
+                      {currentAnswerRecord.isCorrect ? (
+                        <>
+                          <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                          <span className="text-emerald-900">Correct! Excellent recall.</span>
+                        </>
+                      ) : (
+                        <>
+                          <XCircle className="w-5 h-5 text-red-600 shrink-0" />
+                          <span className="text-red-900">Incorrect. Compare your answer with the expected answer:</span>
+                        </>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div className="space-y-1">
+                        <span className="font-bold text-slate-800 block">Your Answer:</span>
+                        <p className="font-mono font-semibold text-slate-900 bg-white/80 p-2.5 rounded-xl border border-slate-200/70 break-words">
+                          {currentAnswerRecord.userAnswer}
+                        </p>
+                      </div>
+                      <div className="space-y-1">
+                        <span className="font-bold text-slate-800 block">Expected Answer:</span>
+                        <p className="font-mono font-bold text-emerald-900 bg-white/80 p-2.5 rounded-xl border border-emerald-200/70 break-words">
+                          {currentQ.correctAnswer}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <span className="font-bold text-slate-800">Academic Explanation:</span>
+                      <p className="leading-relaxed text-slate-700">{currentQ.explanation}</p>
+                    </div>
+
+                    {currentQ.citationExcerpt && (
+                      <div className="pt-1 text-[11px] text-slate-500 italic">
+                        Verbatim textbook citation: "{currentQ.citationExcerpt}" (Page {currentQ.sourcePage})
+                      </div>
                     )}
                   </div>
+                )}
 
-                  <div className="space-y-1">
-                    <span className="font-bold text-slate-800">Correct Answer:</span>
-                    <p className="font-mono font-bold text-slate-900 bg-white/70 p-2 rounded-xl border border-slate-200/60">
-                      {questions[currentIdx].correctAnswer}
-                    </p>
-                  </div>
+                {/* ACTION BUTTONS: CANCEL, SKIP, SUBMIT, OR NEXT */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setStage('setup')}
+                    className="px-3.5 py-2 text-xs font-bold text-slate-600 hover:text-slate-900 transition-colors cursor-pointer"
+                  >
+                    Cancel Exam
+                  </button>
 
-                  <div className="space-y-1">
-                    <span className="font-bold text-slate-800">Academic Explanation:</span>
-                    <p className="leading-relaxed text-slate-700">
-                      {questions[currentIdx].explanation}
-                    </p>
-                  </div>
-
-                  {questions[currentIdx].citationExcerpt && (
-                    <div className="pt-1 text-[11px] text-slate-500 italic">
-                      Verbatim textbook citation: "{questions[currentIdx].citationExcerpt}" (Page{' '}
-                      {questions[currentIdx].sourcePage})
+                  {!isAnswerSubmitted ? (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleSubmitAnswer(true)}
+                        className="px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-colors cursor-pointer"
+                        title="Skip and mark as incorrect"
+                      >
+                        Skip
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSubmitAnswer(false)}
+                        disabled={!textInputMode ? !selectedOption : !userTextAnswer.trim()}
+                        className="px-5 sm:px-6 py-2.5 sm:py-3 bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white text-xs font-black rounded-xl shadow-md transition-all cursor-pointer flex items-center space-x-1.5"
+                      >
+                        <span>Submit Answer</span>
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
                     </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleNextQuestion}
+                      className="px-5 sm:px-6 py-2.5 sm:py-3 bg-gradient-to-r from-red-800 to-indigo-900 hover:from-red-900 hover:to-indigo-950 text-white text-xs font-black rounded-xl shadow-md transition-all cursor-pointer flex items-center space-x-1.5"
+                    >
+                      <span>
+                        {currentIdx < questions.length - 1 ? 'Next Question' : 'Complete Exam'}
+                      </span>
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
                   )}
                 </div>
-              )}
-
-              {/* ACTION BUTTONS: SUBMIT OR NEXT */}
-              <div className="flex items-center justify-between pt-2">
-                <button
-                  type="button"
-                  onClick={() => setStage('setup')}
-                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:text-slate-900 transition-colors cursor-pointer"
-                >
-                  Cancel Exam
-                </button>
-
-                {!isAnswerSubmitted ? (
-                  <button
-                    type="button"
-                    onClick={handleSubmitAnswer}
-                    disabled={
-                      (questions[currentIdx].type === 'multiple_choice' ||
-                        questions[currentIdx].type === 'true_false')
-                        ? !selectedOption
-                        : !userTextAnswer.trim()
-                    }
-                    className="px-6 py-3 bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white text-xs font-black rounded-xl shadow-md transition-all cursor-pointer flex items-center space-x-1.5"
-                  >
-                    <span>Submit Answer</span>
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={handleNextQuestion}
-                    className="px-6 py-3 bg-gradient-to-r from-red-800 to-indigo-900 hover:from-red-900 hover:to-indigo-950 text-white text-xs font-black rounded-xl shadow-md transition-all cursor-pointer flex items-center space-x-1.5"
-                  >
-                    <span>
-                      {currentIdx < questions.length - 1 ? 'Next Question' : 'Complete Exam'}
-                    </span>
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
-                )}
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* COMPLETED EXAM RESULTS STAGE */}
           {stage === 'completed' && finalResult && (
-            <div className="bg-white rounded-3xl border border-slate-200/80 p-6 sm:p-8 shadow-sm space-y-6 max-w-3xl mx-auto">
+            <div className="bg-white rounded-3xl border border-slate-200/80 p-5 sm:p-8 shadow-sm space-y-6 max-w-3xl mx-auto">
               <div className="text-center space-y-2 border-b border-slate-100 pb-5">
                 <div className="inline-flex p-3 bg-emerald-50 text-emerald-700 rounded-2xl mb-1">
                   <Award className="w-8 h-8" />
                 </div>
-                <h3 className="text-2xl font-black text-slate-900">Examination Completed</h3>
+                <h3 className="text-xl sm:text-2xl font-black text-slate-900">Examination Completed</h3>
                 <p className="text-xs text-slate-500">
-                  {finalResult.lessonTitle} • {finalResult.questionCount} Questions Tested
+                  {finalResult.lessonTitle} • {finalResult.questionCount} Questions Tested • {formatDateTime12Hour(finalResult.completedAt)}
                 </p>
               </div>
 

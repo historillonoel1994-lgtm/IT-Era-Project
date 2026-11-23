@@ -14,7 +14,9 @@ import {
   ClipboardList,
 } from 'lucide-react';
 import { TodayPlanItem } from '../types';
-import { getTodayPlan, saveTodayPlan, updateProgress, getStudentProgress } from '../services/storage';
+import { getTodayPlan, saveTodayPlan, updateProgress } from '../services/storage';
+import { formatTimeRange12Hour, getStartMinutesForSort } from '../utils/timeFormat';
+import { Time12Picker } from './Time12Picker';
 
 interface TodaysPlanViewProps {
   onNavigateToTimer: () => void;
@@ -31,9 +33,10 @@ export const TodaysPlanView: React.FC<TodaysPlanViewProps> = ({
   const [filter, setFilter] = useState<'all' | 'work' | 'class' | 'study' | 'break'>('all');
   const [showAddModal, setShowAddModal] = useState(false);
 
-  // New item form
+  // New item form (stores canonical 24-hour "HH:mm" internally, displays 12-hour AM/PM)
   const [newTitle, setNewTitle] = useState('');
-  const [newTime, setNewTime] = useState('18:00 - 18:30');
+  const [newStartTime, setNewStartTime] = useState('18:00');
+  const [newEndTime, setNewEndTime] = useState('18:30');
   const [newCategory, setNewCategory] = useState<TodayPlanItem['category']>('study');
   const [newDesc, setNewDesc] = useState('');
 
@@ -67,13 +70,15 @@ export const TodaysPlanView: React.FC<TodaysPlanViewProps> = ({
     const newItem: TodayPlanItem = {
       id: `tp-${Date.now()}`,
       title: newTitle.trim(),
-      timeSlot: newTime.trim(),
+      timeSlot: `${newStartTime} - ${newEndTime}`,
       category: newCategory,
       description: newDesc.trim() || undefined,
       completed: false,
     };
 
-    const updated = [...items, newItem];
+    const updated = [...items, newItem].sort(
+      (a, b) => getStartMinutesForSort(a.timeSlot) - getStartMinutesForSort(b.timeSlot)
+    );
     setItems(updated);
     saveTodayPlan(updated);
     setShowAddModal(false);
@@ -81,14 +86,16 @@ export const TodaysPlanView: React.FC<TodaysPlanViewProps> = ({
     setNewDesc('');
   };
 
-  const filteredItems = items.filter((item) => {
-    if (filter === 'all') return true;
-    if (filter === 'work') return item.category === 'work';
-    if (filter === 'class') return item.category === 'class';
-    if (filter === 'study') return ['study', 'quiz_review', 'assignment'].includes(item.category);
-    if (filter === 'break') return item.category === 'break';
-    return true;
-  });
+  const filteredItems = items
+    .filter((item) => {
+      if (filter === 'all') return true;
+      if (filter === 'work') return item.category === 'work';
+      if (filter === 'class') return item.category === 'class';
+      if (filter === 'study') return ['study', 'quiz_review', 'assignment'].includes(item.category);
+      if (filter === 'break') return item.category === 'break';
+      return true;
+    })
+    .sort((a, b) => getStartMinutesForSort(a.timeSlot) - getStartMinutesForSort(b.timeSlot));
 
   const getCategoryBadge = (cat: TodayPlanItem['category']) => {
     switch (cat) {
@@ -238,7 +245,7 @@ export const TodaysPlanView: React.FC<TodaysPlanViewProps> = ({
                   </span>
                   {getCategoryBadge(item.category)}
                   <span className="text-xs font-semibold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">
-                    {item.timeSlot}
+                    {formatTimeRange12Hour(item.timeSlot)}
                   </span>
                 </div>
 
@@ -308,16 +315,24 @@ export const TodaysPlanView: React.FC<TodaysPlanViewProps> = ({
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-slate-700 font-semibold mb-1">Time Slot</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. 18:00 - 18:45"
-                    value={newTime}
-                    onChange={(e) => setNewTime(e.target.value)}
-                    className="w-full p-2.5 border border-slate-300 rounded-xl bg-white"
-                  />
+              <div className="space-y-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block text-slate-700 font-semibold mb-1">Start Time</label>
+                    <Time12Picker
+                      value={newStartTime}
+                      onChange={setNewStartTime}
+                      ariaLabel="Activity start time"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-700 font-semibold mb-1">End Time</label>
+                    <Time12Picker
+                      value={newEndTime}
+                      onChange={setNewEndTime}
+                      ariaLabel="Activity end time"
+                    />
+                  </div>
                 </div>
                 <div>
                   <label className="block text-slate-700 font-semibold mb-1">Category</label>

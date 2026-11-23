@@ -1129,9 +1129,17 @@ export const MyAccountModal: React.FC<MyAccountModalProps> = ({
                           Verified Date
                         </span>
                         <span className="font-mono text-slate-700 block pt-0.5">
-                          {mfaStatus.verifiedAt
-                            ? new Date(mfaStatus.verifiedAt).toLocaleString()
-                            : new Date().toLocaleString()}
+                          {(mfaStatus.verifiedAt ? new Date(mfaStatus.verifiedAt) : new Date()).toLocaleString(
+                            'en-US',
+                            {
+                              month: 'short',
+                              day: 'numeric',
+                              year: 'numeric',
+                              hour: 'numeric',
+                              minute: '2-digit',
+                              hour12: true,
+                            }
+                          )}
                         </span>
                       </div>
                     </div>

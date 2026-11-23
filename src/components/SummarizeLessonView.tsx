@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   BookOpen,
   Sparkles,
@@ -36,6 +36,7 @@ interface SummarizeLessonViewProps {
   onNavigateToQuiz: () => void;
   onNavigateToTutor: () => void;
   onOpenUpload: () => void;
+  scrollTrigger?: number;
 }
 
 export const SummarizeLessonView: React.FC<SummarizeLessonViewProps> = ({
@@ -43,7 +44,11 @@ export const SummarizeLessonView: React.FC<SummarizeLessonViewProps> = ({
   onNavigateToQuiz,
   onNavigateToTutor,
   onOpenUpload,
+  scrollTrigger = 0,
 }) => {
+  const lessonStartRef = useRef<HTMLDivElement | null>(null);
+  const lastHandledScrollTriggerRef = useRef<number>(0);
+
   const [currentDoc, setCurrentDoc] = useState<LessonDocument>(lesson);
   const [docStatus, setDocStatus] = useState<DocumentProcessingStatus>(() => {
     if (isPlaceholderContent(lesson.pages)) return lesson.processingStatus || 'reprocessing_required';
@@ -58,6 +63,27 @@ export const SummarizeLessonView: React.FC<SummarizeLessonViewProps> = ({
   // Citation inspector modal state
   const [inspectPage, setInspectPage] = useState<number | string | null>(null);
   const [inspectExcerpt, setInspectExcerpt] = useState<string | undefined>(undefined);
+
+  // Scroll the start of the loaded lesson into view and move keyboard focus cleanly once per explicit load trigger
+  useEffect(() => {
+    if (!scrollTrigger || scrollTrigger === lastHandledScrollTriggerRef.current) return;
+    lastHandledScrollTriggerRef.current = scrollTrigger;
+
+    const timer = window.setTimeout(() => {
+      const target = lessonStartRef.current;
+      if (!target) return;
+      const prefersReducedMotion =
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      target.scrollIntoView({
+        behavior: prefersReducedMotion ? 'auto' : 'smooth',
+        block: 'start',
+      });
+      target.focus({ preventScroll: true });
+    }, 60);
+
+    return () => window.clearTimeout(timer);
+  }, [scrollTrigger]);
 
   // Auto-verify document status and load full pages if incomplete
   useEffect(() => {
@@ -268,9 +294,14 @@ ${summary.quickReviewNotes
   };
 
   return (
-    <div className="space-y-6 animate-fadeIn pb-12">
+    <div
+      ref={lessonStartRef}
+      id="lesson-content-start"
+      tabIndex={-1}
+      className="space-y-6 animate-fadeIn pb-12 scroll-mt-24 outline-none"
+    >
       {/* Header bar */}
-      <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-sm">
+      <div className="bg-white rounded-2xl border border-slate-200/80 p-4 sm:p-5 shadow-sm">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="flex items-start space-x-3.5">
             <div className="p-3 bg-gradient-to-br from-sky-600 to-sky-800 text-white rounded-xl shadow-sm shrink-0">
