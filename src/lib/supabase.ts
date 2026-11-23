@@ -1,5 +1,6 @@
 import { createClient, SupabaseClient, User as SupabaseAuthUser } from '@supabase/supabase-js';
 import { UserProfile, LessonDocument, QuizResult, StudentProgress } from '../types';
+import { apiUrl } from './apiBase';
 
 export const STORAGE_BUCKET = 'study-buddy-materials';
 
@@ -1286,7 +1287,7 @@ export async function verifyUserRoleWithServer(params: {
       }
     }
 
-    const res = await fetch('/api/auth/verify-role', {
+    const res = await fetch(apiUrl('/api/auth/verify-role'), {
       method: 'POST',
       headers,
       body: JSON.stringify(params),
@@ -1330,7 +1331,7 @@ export async function fetchBootstrapStatus(): Promise<{
   superAdminCount: number;
 }> {
   try {
-    const res = await fetch('/api/admin/bootstrap-status');
+    const res = await fetch(apiUrl('/api/admin/bootstrap-status'));
     if (!res.ok) throw new Error('Status failed');
     const data = await res.json();
     return {
@@ -1401,7 +1402,7 @@ export async function updateStudentProfile(profileData: {
     }
 
     // 2. Sync to server backend
-    const resp = await fetch('/api/user/profile', {
+    const resp = await fetch(apiUrl('/api/user/profile'), {
       method: 'POST',
       headers,
       body: JSON.stringify(profileData),
@@ -1511,7 +1512,7 @@ export async function requestAccountDeletion(email: string): Promise<{ success: 
       }
     }
 
-    const res = await fetch('/api/user/delete-account', {
+    const res = await fetch(apiUrl('/api/user/delete-account'), {
       method: 'POST',
       headers,
       body: JSON.stringify({ email }),
@@ -1582,7 +1583,8 @@ export async function getAdminAuthHeaders(adminEmail: string): Promise<Record<st
 
 async function safeAdminFetch(url: string, init?: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, init);
+    const resolvedUrl = url.startsWith('http://') || url.startsWith('https://') ? url : apiUrl(url);
+    return await fetch(resolvedUrl, init);
   } catch (networkErr: any) {
     const err: any = new Error(
       `Cannot connect to the Study Buddy backend server (${networkErr?.message || 'network error'}). Please ensure the Express server is running and accessible.`
@@ -1647,7 +1649,7 @@ export async function checkAdminBackendHealth(): Promise<{
   detail?: string;
 }> {
   try {
-    const res = await fetch('/api/health');
+    const res = await fetch(apiUrl('/api/health'));
     const contentType = (res.headers.get('content-type') || '').toLowerCase();
     if (!res.ok || !contentType.includes('application/json')) {
       return {
@@ -1790,7 +1792,7 @@ export async function fetchMfaStatus(email: string): Promise<{
   // 1. Check backend status
   let backendData: any = null;
   try {
-    const res = await fetch('/api/admin/mfa/status', { headers });
+    const res = await fetch(apiUrl('/api/admin/mfa/status'), { headers });
     if (res.ok) {
       backendData = await res.json();
     }
@@ -1883,7 +1885,7 @@ export async function enrollMfaTotp(params: {
   const headers = await getAdminAuthHeaders(params.email);
   headers['Content-Type'] = 'application/json';
 
-  const res = await fetch('/api/admin/mfa/enroll', {
+  const res = await fetch(apiUrl('/api/admin/mfa/enroll'), {
     method: 'POST',
     headers,
     body: JSON.stringify({ friendlyName: params.friendlyName }),
@@ -1937,7 +1939,7 @@ export async function verifyMfaTotp(params: {
   const headers = await getAdminAuthHeaders(params.email);
   headers['Content-Type'] = 'application/json';
 
-  const res = await fetch('/api/admin/mfa/verify', {
+  const res = await fetch(apiUrl('/api/admin/mfa/verify'), {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -1985,7 +1987,7 @@ export async function unenrollMfaTotp(params: {
   const headers = await getAdminAuthHeaders(params.email);
   headers['Content-Type'] = 'application/json';
 
-  const res = await fetch('/api/admin/mfa/unenroll', {
+  const res = await fetch(apiUrl('/api/admin/mfa/unenroll'), {
     method: 'POST',
     headers,
     body: JSON.stringify({ code: params.code }),

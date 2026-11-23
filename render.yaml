@@ -1,0 +1,34 @@
+# Render Blueprint for Study Buddy AI Backend Web Service
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: study-buddy-ai-backend
+    runtime: node
+    plan: starter
+    region: singapore
+    buildCommand: npm ci --include=dev && npm run build:server
+    startCommand: npm run start:render
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: API_ONLY
+        value: "true"
+      - key: NODE_VERSION
+        value: "22"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_PRIMARY_MODEL
+        value: gemini-2.5-flash
+      - key: GEMINI_FALLBACK_MODEL
+        value: gemini-2.5-flash-lite
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: https://studybuddyaiassistant.netlify.app
+      - key: MAX_UPLOAD_SIZE_MB
+        value: "35"

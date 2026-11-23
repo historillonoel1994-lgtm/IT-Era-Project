@@ -11,6 +11,7 @@ import {
   ConceptContrastItem,
 } from '../types';
 import { checkIsConfigured, supabase } from '../lib/supabase';
+import { apiUrl } from '../lib/apiBase';
 
 // Lightweight read-only getter synced by App.tsx to avoid circular imports with storage.ts
 let apiDemoModeFlag = false;
@@ -79,7 +80,7 @@ export interface StudyPlanParams {
 }
 
 export async function summarizeLesson(params: SummarizeParams): Promise<LessonSummary> {
-  const response = await fetch('/api/summarize', {
+  const response = await fetch(apiUrl('/api/summarize'), {
     method: 'POST',
     headers: await buildApiHeaders(),
     body: JSON.stringify(params),
@@ -98,7 +99,7 @@ export async function summarizeLesson(params: SummarizeParams): Promise<LessonSu
 }
 
 export async function generateQuiz(params: QuizParams): Promise<QuizQuestion[]> {
-  const response = await fetch('/api/quiz', {
+  const response = await fetch(apiUrl('/api/quiz'), {
     method: 'POST',
     headers: await buildApiHeaders(),
     body: JSON.stringify(params),
@@ -133,7 +134,7 @@ export interface AskTutorResult {
 }
 
 export async function askStudyBuddy(params: AskTutorParams): Promise<AskTutorResult> {
-  const response = await fetch('/api/ask-tutor', {
+  const response = await fetch(apiUrl('/api/ask-tutor'), {
     method: 'POST',
     headers: await buildApiHeaders(),
     body: JSON.stringify(params),
@@ -158,7 +159,7 @@ export interface AskGeneralParams {
  * waits for the response, and returns the generated answer.
  */
 export async function askGemini(question: string): Promise<string> {
-  const response = await fetch('/api/ask-general', {
+  const response = await fetch(apiUrl('/api/ask-general'), {
     method: 'POST',
     headers: await buildApiHeaders(),
     body: JSON.stringify({ question }),
@@ -192,7 +193,7 @@ export async function askGeneralGemini(
       ? { question: questionOrParams, chatHistory }
       : questionOrParams;
 
-  const response = await fetch('/api/ask-general', {
+  const response = await fetch(apiUrl('/api/ask-general'), {
     method: 'POST',
     headers: await buildApiHeaders(),
     body: JSON.stringify(payload),
@@ -211,7 +212,7 @@ export async function suggestStudySchedule(params: StudyPlanParams): Promise<{
   weeklyTips: string[];
   suggestedSessions: any[];
 }> {
-  const response = await fetch('/api/suggest-schedule', {
+  const response = await fetch(apiUrl('/api/suggest-schedule'), {
     method: 'POST',
     headers: await buildApiHeaders(),
     body: JSON.stringify(params),
@@ -241,22 +242,68 @@ export async function parseDocumentFile(
   fileType?: string,
   metadata?: { documentId?: string; title?: string; filePath?: string }
 ): Promise<ParsedDocumentResult> {
-  const response = await fetch('/api/parse-document', {
-    method: 'POST',
-    headers: await buildApiHeaders(),
-    body: JSON.stringify({
-      fileBase64: base64,
-      filename,
-      fileType,
-      documentId: metadata?.documentId,
-      title: metadata?.title,
-      filePath: metadata?.filePath,
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(apiUrl('/api/parse-document'), {
+      method: 'POST',
+      headers: await buildApiHeaders(),
+      body: JSON.stringify({
+        fileBase64: base64,
+        filename,
+        fileType,
+        documentId: metadata?.documentId,
+        title: metadata?.title,
+        filePath: metadata?.filePath,
+      }),
+    });
+  } catch {
+    throw new Error(
+      `Could not reach the Study Buddy AI document extraction server while processing "${filename}". Please check your network connection or backend service availability.`
+    );
+  }
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `Failed to extract contents from ${filename} (${response.status})`);
+    const contentType = response.headers.get('content-type') || '';
+    const errorData = contentType.includes('application/json')
+      ? await response.json().catch(() => ({}))
+      : {};
+
+    if (errorData.error) {
+      throw new Error(errorData.error);
+    }
+
+    if (response.status === 401) {
+      throw new Error(
+        `Authentication required to process "${filename}". Please sign in to your Study Buddy AI account and try again.`
+      );
+    }
+    if (response.status === 404) {
+      throw new Error(
+        `Document extraction backend endpoint (/api/parse-document) was not found (HTTP 404). Ensure VITE_API_BASE_URL points to your deployed Render backend service.`
+      );
+    }
+    if (response.status === 413) {
+      throw new Error(
+        `"${filename}" is too large for upload (HTTP 413). Please compress or split the document into a smaller file (under 35MB).`
+      );
+    }
+    if (response.status === 415) {
+      throw new Error(
+        `Unsupported file format for "${filename}". Supported formats: PDF, PPTX, DOCX, XLSX/XLS, CSV/TSV, TXT, MD, and RTF.`
+      );
+    }
+    if (response.status === 422) {
+      throw new Error(
+        `No readable text could be extracted from "${filename}". Verify the file is not corrupted, password-protected, or image-only.`
+      );
+    }
+    if (response.status === 429) {
+      throw new Error('Too many extraction requests in a short time. Please wait a moment and try again.');
+    }
+
+    throw new Error(
+      `Could not extract contents from "${filename}" (server error HTTP ${response.status}). Please try again or verify the file format.`
+    );
   }
 
   return response.json();
@@ -279,7 +326,7 @@ export async function storeDocumentContent(docData: {
   processingStatus?: 'ready' | 'processing' | 'processing_failed' | 'reprocessing_required';
   statusMessage?: string;
 }): Promise<{ success: boolean; document: any }> {
-  const response = await fetch('/api/documents/store', {
+  const response = await fetch(apiUrl('/api/documents/store'), {
     method: 'POST',
     headers: await buildApiHeaders(),
     body: JSON.stringify(docData),
@@ -294,7 +341,9 @@ export async function storeDocumentContent(docData: {
 }
 
 export async function fetchDocumentContent(id: string): Promise<{ success: boolean; document: any }> {
-  const response = await fetch(`/api/documents/${encodeURIComponent(id)}`);
+  const response = await fetch(apiUrl(`/api/documents/${encodeURIComponent(id)}`), {
+    headers: await buildApiHeaders(),
+  });
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
     throw new Error(errorData.message || errorData.error || 'Document content not found.');
@@ -305,9 +354,9 @@ export async function fetchDocumentContent(id: string): Promise<{ success: boole
 
 export async function reprocessDocument(
   id: string,
-  params?: { fileBase64?: string; filename?: string; fileType?: string; title?: string }
+  params?: { fileBase64?: string; filename?: string; fileType?: string; title?: string; filePath?: string }
 ): Promise<{ success: boolean; document: any; message?: string }> {
-  const response = await fetch(`/api/documents/${encodeURIComponent(id)}/reprocess`, {
+  const response = await fetch(apiUrl(`/api/documents/${encodeURIComponent(id)}/reprocess`), {
     method: 'POST',
     headers: await buildApiHeaders(),
     body: JSON.stringify(params || {}),
@@ -341,7 +390,7 @@ export async function explainUnfamiliarTerm(params: {
   allPagesText?: string;
   lessonTitle?: string;
 }): Promise<ExplainTermResult> {
-  const response = await fetch('/api/explain-term', {
+  const response = await fetch(apiUrl('/api/explain-term'), {
     method: 'POST',
     headers: await buildApiHeaders(),
     body: JSON.stringify(params),
@@ -362,7 +411,7 @@ export async function analyzeDocumentChapters(params: {
   documentId?: string;
   filename?: string;
 }): Promise<DocumentChapter[]> {
-  const response = await fetch('/api/analyze-chapters', {
+  const response = await fetch(apiUrl('/api/analyze-chapters'), {
     method: 'POST',
     headers: await buildApiHeaders(),
     body: JSON.stringify(params),
@@ -402,7 +451,7 @@ export interface ReviewerGenerateResult {
 }
 
 export async function generateSelfReviewer(params: ReviewerGenerateParams): Promise<ReviewerGenerateResult> {
-  const response = await fetch('/api/reviewer-generate', {
+  const response = await fetch(apiUrl('/api/reviewer-generate'), {
     method: 'POST',
     headers: await buildApiHeaders(),
     body: JSON.stringify(params),
@@ -424,7 +473,7 @@ export async function generateFlashcards(params: {
   documentId?: string;
   filename?: string;
 }): Promise<FlashcardItem[]> {
-  const response = await fetch('/api/generate-flashcards', {
+  const response = await fetch(apiUrl('/api/generate-flashcards'), {
     method: 'POST',
     headers: await buildApiHeaders(),
     body: JSON.stringify(params),
@@ -446,7 +495,7 @@ export async function generateConceptContrasts(params: {
   documentId?: string;
   filename?: string;
 }): Promise<ConceptContrastItem[]> {
-  const response = await fetch('/api/generate-contrasts', {
+  const response = await fetch(apiUrl('/api/generate-contrasts'), {
     method: 'POST',
     headers: await buildApiHeaders(),
     body: JSON.stringify(params),

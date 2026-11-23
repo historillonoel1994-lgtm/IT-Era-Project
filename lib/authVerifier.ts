@@ -159,7 +159,15 @@ export function getAllowedCorsOrigin(originHeader?: string): string | null {
   if (!originHeader || typeof originHeader !== 'string') return null;
   const cleanOrigin = originHeader.trim().replace(/\/+$/, '');
 
+  const envListOrigins = (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
   const configuredOrigins = [
+    ...envListOrigins,
+    process.env.FRONTEND_URL,
+    process.env.NETLIFY_SITE_URL,
     process.env.URL,
     process.env.DEPLOY_PRIME_URL,
     process.env.APP_URL,
@@ -178,7 +186,7 @@ export function getAllowedCorsOrigin(originHeader?: string): string | null {
     return cleanOrigin;
   }
 
-  // Allow Netlify deploy previews for the same site or local dev hosts
+  // Allow Netlify deploy previews for Study Buddy AI or local dev hosts
   if (
     /^https:\/\/[a-z0-9-]+--studybuddyaiassistant\.netlify\.app$/i.test(cleanOrigin) ||
     /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(cleanOrigin)

@@ -2,22 +2,144 @@ import express, { type Request, type Response } from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import multer from 'multer';
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
-import { PDFParse } from 'pdf-parse';
-import mammoth from 'mammoth';
-import * as xlsx from 'xlsx';
-import JSZip from 'jszip';
 import QRCode from 'qrcode';
+import {
+  extractDocumentPagesFromBuffer as sharedExtractDocumentPagesFromBuffer,
+  buildDocumentChunks,
+  sanitizeFilename,
+  DocumentExtractionError,
+  SUPPORTED_EXTENSIONS,
+} from './lib/documentExtractor';
+import {
+  getAllowedCorsOrigin,
+  extractBearerTokenFromHeaders,
+  verifySupabaseAccessToken as sharedVerifySupabaseAccessToken,
+} from './lib/authVerifier';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const DATA_DIR = path.join(__dirname, '.data');
+// On Render (ephemeral container FS), keep runtime caches in os.tmpdir() unless DATA_DIR is explicitly configured;
+// persistent uploaded study materials live externally in Supabase Storage ("study-buddy-materials").
+const IS_RENDER_RUNTIME = process.env.RENDER === 'true' || Boolean(process.env.RENDER_EXTERNAL_URL);
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : IS_RENDER_RUNTIME
+  ? path.join(os.tmpdir(), 'study-buddy-data')
+  : path.join(__dirname, '.data');
 const DOCS_STORE_FILE = path.join(DATA_DIR, 'documents_store.json');
+
+// Dedicated temp directory for multipart file uploads with guaranteed cleanup
+const UPLOAD_TEMP_DIR = path.join(os.tmpdir(), 'study-buddy-uploads');
+const MAX_UPLOAD_SIZE_MB = Math.min(50, Math.max(5, Number(process.env.MAX_UPLOAD_SIZE_MB) || 35));
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+
+function ensureUploadTempDir(): void {
+  try {
+    if (!fs.existsSync(UPLOAD_TEMP_DIR)) {
+      fs.mkdirSync(UPLOAD_TEMP_DIR, { recursive: true });
+    }
+  } catch (err) {
+    console.error('Failed to ensure temp upload directory:', err);
+  }
+}
+
+async function cleanupTempFile(filePath?: string | null): Promise<void> {
+  if (!filePath) return;
+  try {
+    const resolved = path.resolve(filePath);
+    const resolvedBase = path.resolve(UPLOAD_TEMP_DIR);
+    if (!resolved.startsWith(resolvedBase + path.sep)) return;
+    await fs.promises.unlink(resolved).catch(() => {});
+  } catch {
+    // Ignore already-removed temp file
+  }
+}
+
+function sweepStaleTempUploads(maxAgeMs: number = 15 * 60 * 1000): void {
+  try {
+    if (!fs.existsSync(UPLOAD_TEMP_DIR)) return;
+    const now = Date.now();
+    for (const entry of fs.readdirSync(UPLOAD_TEMP_DIR)) {
+      const fullPath = path.join(UPLOAD_TEMP_DIR, entry);
+      try {
+        const stat = fs.statSync(fullPath);
+        if (stat.isFile() && now - stat.mtimeMs > maxAgeMs) {
+          fs.unlinkSync(fullPath);
+        }
+      } catch {
+        // Ignore individual file errors
+      }
+    }
+  } catch {
+    // Ignore sweep errors
+  }
+}
+
+ensureUploadTempDir();
+sweepStaleTempUploads();
+setInterval(() => sweepStaleTempUploads(), 10 * 60 * 1000).unref();
+
+const uploadMiddleware = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      ensureUploadTempDir();
+      cb(null, UPLOAD_TEMP_DIR);
+    },
+    filename: (_req, file, cb) => {
+      const safeExt = (sanitizeFilename(file.originalname).split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '');
+      cb(null, `upload-${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${safeExt || 'bin'}`);
+    },
+  }),
+  limits: {
+    fileSize: MAX_UPLOAD_BYTES,
+    files: 1,
+  },
+  fileFilter: (_req, file, cb) => {
+    const safeName = sanitizeFilename(file.originalname);
+    const ext = (safeName.split('.').pop() || '').toLowerCase();
+    if (!ext || !SUPPORTED_EXTENSIONS.has(ext)) {
+      cb(
+        new DocumentExtractionError(
+          415,
+          'UNSUPPORTED_FORMAT',
+          `Unsupported file format ".${ext || 'unknown'}". Supported formats: PDF, PPTX, DOCX, XLSX/XLS, CSV/TSV, TXT, MD, and RTF.`
+        ) as any
+      );
+      return;
+    }
+    cb(null, true);
+  },
+});
+
+function parseOptionalMultipartUpload(req: Request, res: Response, next: express.NextFunction): void {
+  const contentType = (req.headers['content-type'] || '').toLowerCase();
+  if (!contentType.includes('multipart/form-data')) {
+    return next();
+  }
+  uploadMiddleware.single('file')(req, res, (err: any) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({
+          error: `Uploaded file exceeds the ${MAX_UPLOAD_SIZE_MB}MB limit. Please compress or split the document.`,
+        });
+      }
+      return res.status(400).json({ error: `File upload error: ${err.message}` });
+    }
+    if (err instanceof DocumentExtractionError) {
+      return res.status(err.statusCode).json({ error: err.message, code: err.code });
+    }
+    return res.status(400).json({ error: err?.message || 'Invalid multipart upload.' });
+  });
+}
 
 interface StoredDocRecord {
   id: string;
@@ -156,6 +278,34 @@ function getDocumentFromStore(key: string): StoredDocRecord | null {
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+
+app.set('trust proxy', 1);
+
+// Strict CORS configuration allowing Netlify frontend (and configured ALLOWED_ORIGINS) without wildcard "*"
+app.use((req: Request, res: Response, next: express.NextFunction) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    const allowedOrigin = getAllowedCorsOrigin(origin);
+    if (allowedOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, X-User-Email, X-Admin-Email, X-Admin-MFA-Token, X-Supabase-Access-Token, X-Demo-Mode, X-Requested-With'
+      );
+      res.setHeader('Access-Control-Max-Age', '86400');
+    } else if (req.method === 'OPTIONS') {
+      return res.status(403).json({ error: 'CORS origin not allowed.' });
+    }
+  }
+
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  return next();
+});
 
 app.use(express.json({ limit: '50mb' }));
 
@@ -302,11 +452,16 @@ const ai = new GoogleGenAI({
   },
 });
 
-const PRIMARY_MODEL = 'gemini-4-hydrogen';
-const CANDIDATE_MODELS = [
-  'gemini-4-hydrogen',
-  'gemini-3.1-flash-lite',
-];
+const PRIMARY_MODEL = (process.env.GEMINI_PRIMARY_MODEL || 'gemini-4-hydrogen').trim();
+const CANDIDATE_MODELS = Array.from(
+  new Set(
+    [
+      PRIMARY_MODEL,
+      (process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.1-flash-lite').trim(),
+      'gemini-2.5-flash',
+    ].filter(Boolean)
+  )
+);
 
 // Robust JSON string cleaner to handle markdown code blocks or edge whitespace
 function cleanJsonString(str: string): string {
@@ -731,301 +886,205 @@ function chunkTextIntoPages(
     : [{ pageNumber: 1, text: rawText.trim() || 'No readable text content found.' }];
 }
 
-// Shared multi-format extraction helper (supports PDF + Gemini scanned PDF OCR fallback, DOCX/DOC, PPTX/PPT, XLSX/CSV, TXT/MD)
+// Shared multi-format extraction wrapper delegating to lib/documentExtractor.ts
 async function extractDocumentPagesFromBuffer(
   dataBuffer: Buffer,
   safeFilename: string
 ): Promise<{ finalPages: { pageNumber: number; text: string }[]; detectedType: string }> {
-  const ext = (safeFilename.split('.').pop() || '').toLowerCase();
-  let finalPages: { pageNumber: number; text: string }[] = [];
-  let detectedType = ext || 'document';
-
-  // 1. PDF Documents (.pdf)
-  if (ext === 'pdf') {
-    detectedType = 'pdf';
-    let parser: PDFParse | null = null;
-    try {
-      parser = new PDFParse({ data: dataBuffer });
-      const textResult = await parser.getText();
-      const rawPages = (textResult.pages || []).map((p, idx) => ({
-        pageNumber: p.num || idx + 1,
-        text: (p.text || '').trim(),
-      }));
-
-      const validPages = rawPages.filter((p) => p.text.length > 0);
-      if (validPages.length > 0) {
-        finalPages = rawPages.map((p) => ({
-          pageNumber: p.pageNumber,
-          text: p.text.length > 0 ? p.text : `[Page ${p.pageNumber} contains diagrams or visual illustrations]`,
-        }));
-      } else if (textResult.text && textResult.text.trim().length > 0) {
-        finalPages = chunkTextIntoPages(textResult.text.trim(), 'Page', 1200);
-      }
-    } catch (pdfErr: any) {
-      console.warn('pdf-parse warning, attempting OCR fallback if applicable:', pdfErr?.message);
-    } finally {
-      if (parser) {
-        try { await parser.destroy(); } catch (e) {}
-      }
-    }
-
-    // Fallback for scanned / image-based PDFs via Gemini Multimodal document understanding
-    if ((finalPages.length === 0 || isPlaceholderContent(finalPages)) && process.env.GEMINI_API_KEY && dataBuffer.length <= 20 * 1024 * 1024) {
-      try {
-        const ocrResponse = await generateContentWithRetry({
-          preferredModel: PRIMARY_MODEL,
-          timeoutMs: 25000,
-          contents: {
-            parts: [
-              {
-                inlineData: {
-                  mimeType: 'application/pdf',
-                  data: dataBuffer.toString('base64'),
-                },
-              },
-              {
-                text: 'Extract all readable educational text, headings, definitions, and content from every page of this PDF accurately in JSON format. Preserve page order.',
-              },
-            ],
-          },
-          config: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                pages: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      pageNumber: { type: Type.INTEGER },
-                      text: { type: Type.STRING },
-                    },
-                    required: ['pageNumber', 'text'],
-                  },
-                },
-              },
-              required: ['pages'],
-            },
-          },
-        });
-        const ocrParsed = JSON.parse(cleanJsonString(ocrResponse.text || '{"pages":[]}'));
-        const ocrPages = (ocrParsed.pages || [])
-          .filter((p: any) => p && typeof p.text === 'string' && p.text.trim().length > 0)
-          .map((p: any, idx: number) => ({
-            pageNumber: Number(p.pageNumber) || idx + 1,
-            text: p.text.trim(),
-          }));
-        if (ocrPages.length > 0) {
-          finalPages = ocrPages;
-        }
-      } catch (ocrErr: any) {
-        console.warn('Gemini PDF OCR fallback failed:', ocrErr?.message);
-      }
-    }
-
-    if (finalPages.length === 0) {
-      finalPages = [{ pageNumber: 1, text: 'No readable text extracted from document.' }];
-    }
-  }
-  // 2. Microsoft Word Documents (.docx, .doc)
-  else if (ext === 'docx' || ext === 'doc') {
-    detectedType = 'docx';
-    try {
-      const docxResult = await mammoth.extractRawText({ buffer: dataBuffer });
-      const text = docxResult.value || '';
-      finalPages = chunkTextIntoPages(text, 'Page', 1200);
-    } catch (docErr: any) {
-      const rawText = dataBuffer.toString('utf-8').replace(/[^\x20-\x7E\n\r\t]/g, ' ');
-      if (rawText.replace(/\s+/g, '').length > 100) {
-        finalPages = chunkTextIntoPages(rawText, 'Section', 1200);
-      } else {
-        throw new Error(`Could not parse Word document: ${docErr.message}`);
-      }
-    }
-  }
-  // 3. PowerPoint Presentations (.pptx, .ppt)
-  else if (ext === 'pptx' || ext === 'ppt') {
-    detectedType = 'pptx';
-    try {
-      const zip = await JSZip.loadAsync(dataBuffer);
-      const slideFiles = Object.keys(zip.files).filter((name) =>
-        /^ppt\/slides\/slide\d+\.xml$/i.test(name)
-      );
-
-      slideFiles.sort((a, b) => {
-        const numA = parseInt(a.match(/slide(\d+)\.xml/i)?.[1] || '0', 10);
-        const numB = parseInt(b.match(/slide(\d+)\.xml/i)?.[1] || '0', 10);
-        return numA - numB;
-      });
-
-      const pages: { pageNumber: number; text: string }[] = [];
-      for (let i = 0; i < slideFiles.length; i++) {
-        const slideFileName = slideFiles[i];
-        const slideXml = await zip.files[slideFileName].async('text');
-        const slideNum = i + 1;
-
-        const textMatches = slideXml.match(/<a:t[^>]*>([\s\S]*?)<\/a:t>/gi) || [];
-        const slideTexts = textMatches
-          .map((m) => decodeXmlEntities(m.replace(/<[^>]+>/g, '')).trim())
-          .filter((t) => t.length > 0);
-
-        let notesText = '';
-        const noteFileName = `ppt/notesSlides/notesSlide${slideNum}.xml`;
-        if (zip.files[noteFileName]) {
-          const noteXml = await zip.files[noteFileName].async('text');
-          const noteMatches = noteXml.match(/<a:t[^>]*>([\s\S]*?)<\/a:t>/gi) || [];
-          notesText = noteMatches
-            .map((m) => decodeXmlEntities(m.replace(/<[^>]+>/g, '')).trim())
-            .filter((t) => t.length > 0)
-            .join(' ');
-        }
-
-        const slideContent = [
-          `[Slide ${slideNum}]`,
-          slideTexts.join('\n'),
-          notesText ? `\n(Presenter Notes: ${notesText})` : '',
-        ].filter(Boolean).join('\n');
-
-        pages.push({
-          pageNumber: slideNum,
-          text: slideContent.trim().length > 0
-            ? slideContent.trim()
-            : `[Slide ${slideNum} - Diagrams, charts, or visual slide]`,
-        });
-      }
-
-      finalPages = pages.length > 0 ? pages : [{ pageNumber: 1, text: 'No text extracted from presentation slides.' }];
-    } catch (pptErr: any) {
-      throw new Error(`Failed to parse presentation: ${pptErr.message}`);
-    }
-  }
-  // 4. Spreadsheets & CSV (.xlsx, .xls, .csv, .tsv)
-  else if (ext === 'xlsx' || ext === 'xls' || ext === 'csv' || ext === 'tsv') {
-    detectedType = ext === 'csv' || ext === 'tsv' ? 'csv' : 'xlsx';
-    try {
-      const workbook = xlsx.read(dataBuffer, { type: 'buffer' });
-      const pages: { pageNumber: number; text: string }[] = [];
-      let pageNum = 1;
-
-      for (const sheetName of workbook.SheetNames) {
-        const worksheet = workbook.Sheets[sheetName];
-        const csvText = xlsx.utils.sheet_to_csv(worksheet);
-        if (!csvText || !csvText.trim()) continue;
-
-        const rows = csvText.split('\n').filter((r) => r.trim().length > 0);
-        if (rows.length === 0) continue;
-
-        const CHUNK_SIZE = 30;
-        for (let r = 0; r < rows.length; r += CHUNK_SIZE) {
-          const chunkRows = rows.slice(r, r + CHUNK_SIZE);
-          const startRow = r + 1;
-          const endRow = Math.min(r + CHUNK_SIZE, rows.length);
-          const rowLabel = rows.length > CHUNK_SIZE ? ` (Rows ${startRow}-${endRow} of ${rows.length})` : '';
-          pages.push({
-            pageNumber: pageNum++,
-            text: `Spreadsheet Sheet: "${sheetName}"${rowLabel}\n\n${chunkRows.join('\n')}`,
-          });
-        }
-      }
-
-      finalPages = pages.length > 0 ? pages : [{ pageNumber: 1, text: 'Spreadsheet contains no readable rows.' }];
-    } catch (sheetErr: any) {
-      throw new Error(`Failed to parse spreadsheet: ${sheetErr.message}`);
-    }
-  }
-  // 5. Plain text, Markdown, RTF, JSON, Code files (.txt, .md, .rtf, .json, etc.)
-  else {
-    detectedType = ext || 'txt';
-    const text = dataBuffer.toString('utf-8');
-    finalPages = chunkTextIntoPages(text, 'Section', 1200);
-  }
-
+  const { finalPages, detectedType } = await sharedExtractDocumentPagesFromBuffer(dataBuffer, safeFilename, {
+    geminiApiKey: process.env.GEMINI_API_KEY,
+    preferredModel: PRIMARY_MODEL,
+    fallbackModel: CANDIDATE_MODELS[1] || 'gemini-2.5-flash',
+  });
   return { finalPages, detectedType };
 }
 
-// 1. Multi-format Document Parser Endpoint (PDF, DOCX/DOC, PPTX/PPT, XLSX/CSV, TXT/MD)
-app.post(['/api/parse-document', '/api/parse-pdf'], async (req: Request, res: Response) => {
-  const { fileBase64, pdfBase64, filename } = req.body;
-  const rawBase64 = fileBase64 || pdfBase64;
-  if (!rawBase64 || typeof rawBase64 !== 'string') {
-    return res.status(400).json({ error: 'No document data provided' });
+// Helper to verify caller authentication on document processing routes when Supabase Auth is configured
+async function verifyDocumentRequestAuth(req: Request): Promise<{ ok: boolean; status?: number; error?: string }> {
+  const supabaseConfiguredOnServer = Boolean(
+    (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim() &&
+      (
+        process.env.SUPABASE_ANON_KEY ||
+        process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+        process.env.VITE_SUPABASE_ANON_KEY ||
+        ''
+      ).trim()
+  );
+
+  const token = extractBearerTokenFromHeaders(req.headers as Record<string, string | string[] | undefined>);
+  if (token) {
+    const verified = await sharedVerifySupabaseAccessToken(token);
+    if (!verified.valid) {
+      return {
+        ok: false,
+        status: 401,
+        error: verified.reason || 'Authentication session is invalid or expired. Please sign in again.',
+      };
+    }
+    return { ok: true };
   }
 
-  const safeFilename = filename || 'Uploaded_Document';
-  const cleanBase64 = rawBase64.replace(/^data:[^;]+;base64,/, '');
-  const dataBuffer = Buffer.from(cleanBase64, 'base64');
+  // When running with server-side Supabase Auth configured (e.g. Render production), require an authenticated user
+  if (supabaseConfiguredOnServer) {
+    return {
+      ok: false,
+      status: 401,
+      error: 'Authentication required to process uploaded files. Please sign in to your Study Buddy AI account.',
+    };
+  }
+
+  return { ok: true };
+}
+
+// Fetch persisted original file from external Supabase Storage ("study-buddy-materials") using caller's Bearer JWT (honors RLS)
+async function fetchOriginalFromSupabaseStorage(
+  filePath: string,
+  bearerToken: string
+): Promise<Buffer | null> {
+  const supabaseUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
+  const supabaseKey = (
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    ''
+  ).trim();
+  if (!supabaseUrl || !supabaseKey || !filePath || !bearerToken) return null;
+
+  const cleanPath = filePath
+    .split('/')
+    .filter((seg) => seg && seg !== '.' && seg !== '..')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+  if (!cleanPath) return null;
 
   try {
-    const { finalPages, detectedType } = await extractDocumentPagesFromBuffer(dataBuffer, safeFilename);
-    const hasReadableText = !isPlaceholderContent(finalPages);
-    const statusValue: StoredDocRecord['processingStatus'] = hasReadableText ? 'ready' : 'processing_failed';
+    const storageUrl = `${supabaseUrl.replace(/\/+$/, '')}/storage/v1/object/authenticated/study-buddy-materials/${cleanPath}`;
+    const resp = await fetch(storageUrl, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${bearerToken}`,
+        apikey: supabaseKey,
+      },
+    });
+    if (!resp.ok) return null;
+    const arrayBuf = await resp.arrayBuffer();
+    if (!arrayBuf || arrayBuf.byteLength === 0 || arrayBuf.byteLength > MAX_UPLOAD_BYTES) return null;
+    return Buffer.from(arrayBuf);
+  } catch (err) {
+    console.warn('Supabase Storage fetch during reprocess failed:', err);
+    return null;
+  }
+}
 
-    const chunks = finalPages.map((p, idx) => ({
-      chunkId: `chunk-${idx + 1}`,
-      pageNumber: p.pageNumber,
-      text: p.text,
-      keywords: extractTopKeywords(p.text, 8),
-      charCount: p.text.length,
-    }));
+// 1. Multi-format Document Parser Endpoint (PDF, DOCX/DOC, PPTX/PPT, XLSX/CSV, TXT/MD/RTF)
+// Supports BOTH multipart/form-data (field "file" with guaranteed temp cleanup) AND JSON base64 payloads
+app.post(
+  ['/api/parse-document', '/api/parse-pdf'],
+  parseOptionalMultipartUpload,
+  async (req: Request, res: Response) => {
+    const tempFilePath = (req as any).file?.path as string | undefined;
 
-    const fullTextLength = finalPages.reduce((sum, p) => sum + p.text.length, 0);
+    try {
+      const authCheck = await verifyDocumentRequestAuth(req);
+      if (!authCheck.ok) {
+        return res.status(authCheck.status || 401).json({ error: authCheck.error });
+      }
 
-    if (hasReadableText) {
-      parsedDocumentCache.set(safeFilename, {
+      let dataBuffer: Buffer;
+      let safeFilename: string;
+
+      if ((req as any).file && tempFilePath) {
+        safeFilename = sanitizeFilename((req as any).file.originalname || req.body?.filename || 'Uploaded_Document');
+        dataBuffer = await fs.promises.readFile(tempFilePath);
+      } else {
+        const { fileBase64, pdfBase64, filename, fileName } = req.body || {};
+        const rawBase64 = fileBase64 || pdfBase64;
+        if (!rawBase64 || typeof rawBase64 !== 'string') {
+          return res.status(400).json({
+            error: 'No document data provided. Upload a supported file (PDF, PPTX, DOCX, XLSX, CSV, TXT, MD, or RTF).',
+          });
+        }
+        safeFilename = sanitizeFilename(filename || fileName || 'Uploaded_Document');
+        const cleanBase64 = rawBase64.replace(/^data:[^;]+;base64,/, '');
+        dataBuffer = Buffer.from(cleanBase64, 'base64');
+      }
+
+      if (dataBuffer.length > MAX_UPLOAD_BYTES) {
+        return res.status(413).json({
+          error: `The file "${safeFilename}" exceeds the ${MAX_UPLOAD_SIZE_MB}MB extraction limit. Please compress or split the document.`,
+        });
+      }
+
+      const { finalPages, detectedType } = await extractDocumentPagesFromBuffer(dataBuffer, safeFilename);
+      const hasReadableText = !isPlaceholderContent(finalPages);
+      const statusValue: StoredDocRecord['processingStatus'] = hasReadableText ? 'ready' : 'processing_failed';
+      const chunks = buildDocumentChunks(finalPages);
+      const fullTextLength = finalPages.reduce((sum, p) => sum + p.text.length, 0);
+
+      if (hasReadableText) {
+        parsedDocumentCache.set(safeFilename, {
+          filename: safeFilename,
+          fileType: detectedType,
+          totalPages: finalPages.length,
+          pages: finalPages,
+          chunks,
+          fullTextLength,
+          uploadedAt: new Date().toISOString(),
+        });
+      }
+
+      const docId = (req.body?.documentId as string) || (req.body?.id as string) || `doc-${Date.now()}`;
+      const storedRecord = saveDocumentToStore({
+        id: docId,
+        title: (req.body?.title as string) || (req.body?.lessonTitle as string) || safeFilename,
         filename: safeFilename,
+        filePath: req.body?.filePath as string,
         fileType: detectedType,
         totalPages: finalPages.length,
         pages: finalPages,
         chunks,
+        processingStatus: statusValue,
+        statusMessage: hasReadableText
+          ? 'Document extracted and ready for study.'
+          : 'No readable text could be extracted from this file. It may be a scanned image without selectable text.',
         fullTextLength,
-        uploadedAt: new Date().toISOString(),
       });
-    }
 
-    const docId = (req.body?.documentId as string) || (req.body?.id as string) || `doc-${Date.now()}`;
-    const storedRecord = saveDocumentToStore({
-      id: docId,
-      title: (req.body?.title as string) || (req.body?.lessonTitle as string) || safeFilename,
-      filename: safeFilename,
-      filePath: req.body?.filePath as string,
-      fileType: detectedType,
-      totalPages: finalPages.length,
-      pages: finalPages,
-      chunks,
-      processingStatus: statusValue,
-      statusMessage: hasReadableText
-        ? 'Document extracted and ready for study.'
-        : 'No readable text could be extracted from this file. It may be a scanned image without selectable text.',
-      fullTextLength,
-    });
+      if (!hasReadableText) {
+        return res.status(422).json({
+          error: `No readable text could be extracted from "${safeFilename}". Please verify the file contains selectable text or try a different format.`,
+          processingStatus: 'processing_failed',
+        });
+      }
 
-    if (!hasReadableText) {
-      return res.status(422).json({
-        error: `No readable text could be extracted from ${safeFilename}. Please verify the file contains selectable text or try a different format.`,
-        processingStatus: 'processing_failed',
+      return res.json({
+        success: true,
+        documentId: storedRecord.id,
+        totalPages: finalPages.length,
+        pages: finalPages,
+        chunks,
+        fullTextLength,
+        filename: safeFilename,
+        fileType: detectedType,
+        processingStatus: 'ready',
       });
+    } catch (error: any) {
+      if (error instanceof DocumentExtractionError) {
+        return res.status(error.statusCode).json({
+          error: error.message,
+          code: error.code,
+          processingStatus: 'processing_failed',
+        });
+      }
+      console.error('Error parsing document:', error);
+      return res.status(500).json({
+        error: `Failed to extract contents from the uploaded document: ${error?.message || 'Unexpected processing error.'}`,
+      });
+    } finally {
+      await cleanupTempFile(tempFilePath);
     }
-
-    res.json({
-      success: true,
-      documentId: storedRecord.id,
-      totalPages: finalPages.length,
-      pages: finalPages,
-      chunks,
-      fullTextLength,
-      filename: safeFilename,
-      fileType: detectedType,
-      processingStatus: 'ready',
-    });
-  } catch (error: any) {
-    console.error('Error parsing document:', error);
-    res.status(500).json({
-      error: `Failed to extract contents from ${safeFilename}.`,
-      details: error.message,
-    });
   }
-});
+);
 
 // Endpoint: Store or update complete extracted document content
 app.post('/api/documents/store', (req: Request, res: Response) => {
@@ -1072,70 +1131,94 @@ app.get('/api/documents/:id', (req: Request, res: Response) => {
   });
 });
 
-// Endpoint: Reprocess document content
-app.post('/api/documents/:id/reprocess', async (req: Request, res: Response) => {
-  const { id } = req.params;
-  const { fileBase64, filename, filePath, title } = req.body;
+// Endpoint: Reprocess document content (supports base64, multipart upload, OR pulling original file from external Supabase Storage)
+app.post(
+  '/api/documents/:id/reprocess',
+  parseOptionalMultipartUpload,
+  async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { fileBase64, filename, fileName, filePath, title } = req.body || {};
+    const tempFilePath = (req as any).file?.path as string | undefined;
 
-  if (fileBase64 && typeof fileBase64 === 'string') {
     try {
-      const safeFilename = filename || id || 'Uploaded_Document';
-      const cleanBase64 = fileBase64.replace(/^data:[^;]+;base64,/, '');
-      const dataBuffer = Buffer.from(cleanBase64, 'base64');
-
-      const { finalPages, detectedType } = await extractDocumentPagesFromBuffer(dataBuffer, safeFilename);
-
-      if (finalPages.length > 0 && !isPlaceholderContent(finalPages)) {
-        const chunks = finalPages.map((p, idx) => ({
-          chunkId: `chunk-${idx + 1}`,
-          pageNumber: p.pageNumber,
-          text: p.text,
-          keywords: extractTopKeywords(p.text, 8),
-          charCount: p.text.length,
-        }));
-
-        const record = saveDocumentToStore({
-          id,
-          title: title || safeFilename,
-          filename: safeFilename,
-          filePath,
-          fileType: detectedType,
-          totalPages: finalPages.length,
-          pages: finalPages,
-          chunks,
-          processingStatus: 'ready',
-          statusMessage: 'Document reprocessed successfully.',
-        });
-
-        return res.json({ success: true, document: record, message: 'Document reprocessed successfully.' });
+      const authCheck = await verifyDocumentRequestAuth(req);
+      if (!authCheck.ok) {
+        return res.status(authCheck.status || 401).json({ error: authCheck.error });
       }
-      return res.status(422).json({
-        error: `No readable text could be extracted while reprocessing ${safeFilename}.`,
-        processingStatus: 'processing_failed',
+
+      let dataBuffer: Buffer | null = null;
+      const safeFilename = sanitizeFilename((req as any).file?.originalname || filename || fileName || id || 'Uploaded_Document');
+
+      if ((req as any).file && tempFilePath) {
+        dataBuffer = await fs.promises.readFile(tempFilePath);
+      } else if (fileBase64 && typeof fileBase64 === 'string') {
+        const cleanBase64 = fileBase64.replace(/^data:[^;]+;base64,/, '');
+        dataBuffer = Buffer.from(cleanBase64, 'base64');
+      } else if (filePath && typeof filePath === 'string') {
+        const bearerToken = extractBearerTokenFromHeaders(
+          req.headers as Record<string, string | string[] | undefined>
+        );
+        if (bearerToken) {
+          dataBuffer = await fetchOriginalFromSupabaseStorage(filePath, bearerToken);
+        }
+      }
+
+      if (dataBuffer) {
+        const { finalPages, detectedType } = await extractDocumentPagesFromBuffer(dataBuffer, safeFilename);
+        if (finalPages.length > 0 && !isPlaceholderContent(finalPages)) {
+          const chunks = buildDocumentChunks(finalPages);
+          const record = saveDocumentToStore({
+            id,
+            title: title || safeFilename,
+            filename: safeFilename,
+            filePath,
+            fileType: detectedType,
+            totalPages: finalPages.length,
+            pages: finalPages,
+            chunks,
+            processingStatus: 'ready',
+            statusMessage: 'Document reprocessed successfully.',
+          });
+
+          return res.json({ success: true, document: record, message: 'Document reprocessed successfully.' });
+        }
+        return res.status(422).json({
+          error: `No readable text could be extracted while reprocessing "${safeFilename}".`,
+          processingStatus: 'processing_failed',
+        });
+      }
+
+      // Check if we already have valid extracted content in the cache store
+      const existing = getDocumentFromStore(id) || (filename ? getDocumentFromStore(filename) : null);
+      if (existing && !isPlaceholderContent(existing.pages)) {
+        const updated = saveDocumentToStore({
+          ...existing,
+          id,
+          processingStatus: 'ready',
+          statusMessage: 'Document content verified and ready.',
+        });
+        return res.json({ success: true, document: updated, message: 'Document content verified and ready.' });
+      }
+
+      return res.status(404).json({
+        error: 'Original document content not found for automatic reprocessing.',
+        processingStatus: 'reprocessing_required',
+        message: 'This learning material needs to be processed again to access its complete content.',
       });
     } catch (err: any) {
-      return res.status(500).json({ error: `Reprocessing failed: ${err.message}` });
+      if (err instanceof DocumentExtractionError) {
+        return res.status(err.statusCode).json({
+          error: err.message,
+          code: err.code,
+          processingStatus: 'processing_failed',
+        });
+      }
+      return res.status(500).json({ error: `Reprocessing failed: ${err?.message || 'Unexpected error.'}` });
+    } finally {
+      await cleanupTempFile(tempFilePath);
     }
   }
-
-  // Check if we already have valid extracted content in the persistent store
-  const existing = getDocumentFromStore(id) || (filename ? getDocumentFromStore(filename) : null);
-  if (existing && !isPlaceholderContent(existing.pages)) {
-    const updated = saveDocumentToStore({
-      ...existing,
-      id,
-      processingStatus: 'ready',
-      statusMessage: 'Document content verified and ready.',
-    });
-    return res.json({ success: true, document: updated, message: 'Document content verified and ready.' });
-  }
-
-  return res.status(404).json({
-    error: 'Original document content not found for automatic reprocessing.',
-    processingStatus: 'reprocessing_required',
-    message: 'This learning material needs to be processed again to access its complete content.',
-  });
-});
+);
 
 // 2. FEATURE 1: Summarize Lesson
 // High-traffic fallback: Grounded Document Summary Extractor
@@ -3408,12 +3491,29 @@ function verifyAdminMfaAssurance(req: Request, adminEmail: string): {
 // ENDPOINTS
 // -------------------------------------------------------------
 
-// Health Check Endpoint for Admin & Runtime Diagnostics
+// Health Check Endpoint for Render, Admin & Runtime Diagnostics (exposes non-secret readiness flags only)
 app.get('/api/health', (_req: Request, res: Response) => {
+  const supabaseConfigured = Boolean(
+    (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim() &&
+      (
+        process.env.SUPABASE_ANON_KEY ||
+        process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+        process.env.VITE_SUPABASE_ANON_KEY ||
+        ''
+      ).trim()
+  );
+
   res.json({
     ok: true,
-    service: 'study-buddy-ai',
+    status: 'ok',
+    service: 'study-buddy-ai-backend',
+    environment: process.env.NODE_ENV || 'development',
+    apiOnly: process.env.API_ONLY === 'true' || IS_RENDER_RUNTIME,
+    uptimeSeconds: Math.round(process.uptime()),
     primaryModel: PRIMARY_MODEL,
+    geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
+    supabaseConfigured,
+    maxUploadSizeMb: MAX_UPLOAD_SIZE_MB,
     timestamp: new Date().toISOString(),
   });
 });
@@ -4350,13 +4450,30 @@ app.post('/api/user/profile', async (req: Request, res: Response) => {
   });
 });
 
-// Vite middleware or production static serving
+// Vite middleware (local dev), static production serving, or standalone Render API-only service
 async function setupApp() {
-  if (process.env.NODE_ENV === 'production') {
-    app.use(express.static(path.join(__dirname, 'dist')));
-    app.get('*', (_req: Request, res: Response) => {
-      res.sendFile(path.join(__dirname, 'dist', 'index.html'));
-    });
+  const isApiOnly = process.env.API_ONLY === 'true' || IS_RENDER_RUNTIME;
+  const distIndexPath = path.join(__dirname, 'dist', 'index.html');
+
+  if (process.env.NODE_ENV === 'production' || isApiOnly) {
+    if (!isApiOnly && fs.existsSync(distIndexPath)) {
+      app.use(express.static(path.join(__dirname, 'dist')));
+      app.get('*', (_req: Request, res: Response) => {
+        res.sendFile(distIndexPath);
+      });
+    } else {
+      app.get('/', (_req: Request, res: Response) => {
+        res.json({
+          ok: true,
+          service: 'study-buddy-ai-backend',
+          status: 'running',
+          health: '/api/health',
+        });
+      });
+      app.use((_req: Request, res: Response) => {
+        res.status(404).json({ error: 'API endpoint not found.' });
+      });
+    }
   } else {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -4367,9 +4484,13 @@ async function setupApp() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Study Buddy AI server running at http://0.0.0.0:${PORT}`);
+    console.log(
+      `Study Buddy AI server running at http://0.0.0.0:${PORT} (mode=${isApiOnly ? 'api-only' : process.env.NODE_ENV || 'development'})`
+    );
   });
 }
+
+export { app };
 
 setupApp().catch((err) => {
   console.error('Failed to start server:', err);
