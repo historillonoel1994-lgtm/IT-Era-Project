@@ -1,0 +1,44 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+  external_node_modules = [
+    "pdf-parse",
+    "pdfjs-dist",
+    "@napi-rs/canvas",
+    "mammoth",
+    "xlsx",
+    "jszip",
+    "express",
+    "serverless-http",
+    "@google/genai"
+  ]
+
+# Dedicated authenticated multi-format document extraction function (PDF, PPTX, DOCX, XLSX, CSV, TXT)
+[[redirects]]
+  from = "/api/parse-document"
+  to = "/.netlify/functions/parse-document"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/parse-pdf"
+  to = "/.netlify/functions/parse-document"
+  status = 200
+  force = true
+
+# Route all remaining Study Buddy AI backend endpoints (summarizer, quiz, AI tutor, auth role verify, admin, documents)
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+  force = true
+
+# Single-Page Application fallback for React routes
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
